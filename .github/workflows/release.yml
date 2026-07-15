@@ -1,26 +1,40 @@
 name: Release
 
-# Manual, deliberate releases only: run from the Actions tab, passing the
-# version Cargo.toml already carries (the workflow refuses a mismatch, so
-# bump Cargo.toml in a normal commit first — and give the version its
-# CHANGELOG.md section in the same commit: the gates refuse to release a
-# version the changelog does not describe). Runs the full gate battery
-# plus a PGO gate, publishes to crates.io, then tags vX.Y.Z and creates
-# the GitHub release with that changelog section as its notes. Requires
-# the CARGO_REGISTRY_TOKEN repository secret.
+# Manual, deliberate releases only: run from the Actions tab. The
+# version is whatever Cargo.toml carries, so bump Cargo.toml in a
+# normal commit first and give the version its CHANGELOG.md section in
+# the same commit: the gates refuse to release a version the changelog
+# does not describe or that is already tagged. Runs the full gate
+# battery plus a PGO gate, publishes to crates.io, then tags vX.Y.Z and
+# creates the GitHub release with that changelog section as its notes.
+# Requires the CARGO_REGISTRY_TOKEN repository secret.
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (must match Cargo.toml, e.g. 0.1.0)"
-        required: true
 
 permissions:
   contents: write
 
 jobs:
+  # Read the version from Cargo.toml; every later job uses this output.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "releasing ${VERSION}"
+
   gates:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,25 +42,17 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Verify the requested version matches Cargo.toml
-        run: |
-          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          if [ "$crate_version" != "${{ github.event.inputs.version }}" ]; then
-            echo "Cargo.toml has $crate_version but the release input is ${{ github.event.inputs.version }}" >&2
-            exit 1
-          fi
-
       - name: Verify the tag does not already exist
         run: |
           git fetch --tags --quiet
-          if git rev-parse "v${{ github.event.inputs.version }}" >/dev/null 2>&1; then
-            echo "tag v${{ github.event.inputs.version }} already exists" >&2
+          if git rev-parse "${{ needs.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "tag ${{ needs.version.outputs.tag }} already exists" >&2
             exit 1
           fi
 
       - name: Verify CHANGELOG.md has a section for this version
         run: |
-          .github/workflows/changelog-section.sh "${{ github.event.inputs.version }}" > /tmp/release-notes.md
+          .github/workflows/changelog-section.sh "${{ needs.version.outputs.version }}" > /tmp/release-notes.md
           echo "--- release notes ---"
           cat /tmp/release-notes.md
 
@@ -90,7 +96,7 @@ jobs:
           RUSTFLAGS: -C profile-use=${{ github.workspace }}/pgo-data/merged.profdata
 
   publish:
-    needs: [gates, pgo]
+    needs: [version, gates, pgo]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +109,7 @@ jobs:
 
       - name: Tag and create the GitHub release from the changelog
         run: |
-          version="${{ github.event.inputs.version }}"
+          version="${{ needs.version.outputs.version }}"
           .github/workflows/changelog-section.sh "$version" > /tmp/release-notes.md
           # Append the commit-range link that --generate-notes would have
           # provided, when there is a previous tag to compare against.
