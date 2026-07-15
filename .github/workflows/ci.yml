@@ -23,6 +23,9 @@ jobs:
           - os: ubuntu-latest
           # aarch64: executes the NEON kernels.
           - os: macos-latest
+          # x86_64 MSVC: same kernels as Linux under a different OS,
+          # linker, and panic machinery.
+          - os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +101,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+      # --target is explicit because the prebuilt cargo-fuzz binary is a
+      # static musl build, and cargo-fuzz defaults to the triple it was
+      # itself compiled for; without this it builds the fuzz targets for
+      # x86_64-unknown-linux-musl, which the nightly toolchain here has
+      # no std for (E0463: can't find crate for `core`).
+      - run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60
         env:
           RUST_BACKTRACE: "1"
       - uses: actions/upload-artifact@v4

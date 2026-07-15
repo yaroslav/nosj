@@ -27,8 +27,11 @@ jobs:
           tool: cargo-fuzz
       # -rss_limit_mb=8192: ASan bookkeeping (not the targets) accumulates
       # RSS on long allocation-heavy runs.
+      # --target is explicit because the prebuilt cargo-fuzz binary is a
+      # static musl build and would otherwise default to the musl triple.
       - run: >
-          cargo fuzz run ${{ matrix.target }} --
+          cargo fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu --
           -max_total_time=$(( 60 * ${{ github.event.inputs.minutes || 15 }} ))
           -rss_limit_mb=8192
         env:
