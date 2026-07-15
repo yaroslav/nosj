@@ -409,8 +409,9 @@ fn contenders(data: &str) -> Vec<Contender> {
     // asmjson: AVX-512-specialized lazy DOM; on non-x86_64 this exercises
     // its fallback path (no generator). Experimental with incomplete
     // coverage, so probe first and sit the file out on failure. Absent
-    // entirely on x86_64 macOS, where its ELF assembly cannot build.
-    #[cfg(not(all(target_arch = "x86_64", target_os = "macos")))]
+    // entirely on x86_64 macOS and Windows, where its ELF assembly
+    // cannot build (the dependency is target-gated to match).
+    #[cfg(not(any(windows, all(target_arch = "x86_64", target_os = "macos"))))]
     if asmjson::parse_to_dom(&input, None).is_some() {
         let parse_input = input.clone();
         list.push(Contender {

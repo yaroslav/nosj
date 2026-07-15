@@ -83,9 +83,10 @@ simd-json = "0.17.3"
 sonic-rs = "0.5.8"
 
 # asmjson's hand-written assembly uses ELF directives and cannot assemble
-# for x86_64 macOS (the Rosetta test target); everywhere else it builds
-# (on non-x86_64 it uses its fallback path).
-[target.'cfg(not(all(target_arch = "x86_64", target_os = "macos")))'.dev-dependencies]
+# for x86_64 macOS (the Rosetta test target) or Windows (MSVC's lib.exe
+# cannot consume its objects); everywhere else it builds (on non-x86_64
+# it uses its fallback path).
+[target.'cfg(not(any(windows, all(target_arch = "x86_64", target_os = "macos"))))'.dev-dependencies]
 asmjson = "0.2.6"
 
 [features]
