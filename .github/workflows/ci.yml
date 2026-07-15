@@ -44,7 +44,7 @@ jobs:
 
   # SSE2-only coverage: Rosetta 2 on the arm64 macOS runners executes
   # x86_64 binaries but cannot execute AVX2, so runtime detection takes
-  # the SSE2 paths — a configuration the runners can't reach natively.
+  # the SSE2 paths, a configuration the runners can't reach natively.
   sse2:
     runs-on: macos-latest
     steps:
@@ -83,7 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --dry-run
 
-  # Short fuzz runs as a smoke test — long campaigns run on demand or on
+  # Short fuzz runs as a smoke test; long campaigns run on demand or on
   # the weekly schedule via fuzz.yml. Each target gets 60 seconds; a
   # finding fails the job and uploads the input as an artifact.
   fuzz:

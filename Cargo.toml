@@ -36,7 +36,8 @@ itoa = "1.0.18"
 zmij = { version = "1.0.21", optional = true }
 
 # Standalone builds (tests, kernel_bench) use the same codegen settings the
-# downstream host builds this crate with — benchmark numbers stay comparable.
+# downstream host builds this crate with, so benchmark numbers stay
+# comparable.
 [profile.release]
 opt-level = 3
 lto = "fat"

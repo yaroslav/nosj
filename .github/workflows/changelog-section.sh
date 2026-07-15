@@ -2,7 +2,7 @@
 # Print the CHANGELOG.md section for one version (Keep a Changelog
 # layout: everything between "## [X.Y.Z]" and the next "## [" heading,
 # minus the reference-link footer). Exits non-zero if the section is
-# missing or empty — releasing a version the changelog does not
+# missing or empty: releasing a version the changelog does not
 # describe is a mistake, not a formality.
 #
 # Usage: changelog-section.sh <version>

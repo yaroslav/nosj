@@ -56,7 +56,7 @@ jobs:
           echo "--- release notes ---"
           cat /tmp/release-notes.md
 
-      # The full gate battery — a release must never outrun CI.
+      # The full gate battery: a release must never outrun CI.
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
