@@ -1,0 +1,120 @@
+name: Release
+
+# Manual, deliberate releases only: run from the Actions tab, passing the
+# version Cargo.toml already carries (the workflow refuses a mismatch, so
+# bump Cargo.toml in a normal commit first — and give the version its
+# CHANGELOG.md section in the same commit: the gates refuse to release a
+# version the changelog does not describe). Runs the full gate battery
+# plus a PGO gate, publishes to crates.io, then tags vX.Y.Z and creates
+# the GitHub release with that changelog section as its notes. Requires
+# the CARGO_REGISTRY_TOKEN repository secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (must match Cargo.toml, e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Verify the requested version matches Cargo.toml
+        run: |
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$crate_version" != "${{ github.event.inputs.version }}" ]; then
+            echo "Cargo.toml has $crate_version but the release input is ${{ github.event.inputs.version }}" >&2
+            exit 1
+          fi
+
+      - name: Verify the tag does not already exist
+        run: |
+          git fetch --tags --quiet
+          if git rev-parse "v${{ github.event.inputs.version }}" >/dev/null 2>&1; then
+            echo "tag v${{ github.event.inputs.version }} already exists" >&2
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG.md has a section for this version
+        run: |
+          .github/workflows/changelog-section.sh "${{ github.event.inputs.version }}" > /tmp/release-notes.md
+          echo "--- release notes ---"
+          cat /tmp/release-notes.md
+
+      # The full gate battery — a release must never outrun CI.
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test
+      - run: cargo test --release --all-features
+      - run: cargo publish --dry-run
+
+  # Production consumers compile this crate under profile-guided
+  # optimization, so the release gate builds it the same way: train on
+  # the benchmark corpus, rebuild with the merged profile, and run the
+  # full test suite against the PGO codegen. The PGO'd benchmark run at
+  # the end is informational only (shared runners are noisy) — the gate
+  # is that the tests pass.
+  pgo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+
+      - name: Build instrumented and train on the benchmark corpus
+        run: cargo run --release --example compare
+        env:
+          RUSTFLAGS: -C profile-generate=${{ github.workspace }}/pgo-data
+
+      - name: Merge the training profiles
+        run: |
+          profdata=$(echo "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata)
+          test -x "$profdata" || { echo "llvm-profdata not found in the sysroot" >&2; exit 1; }
+          "$profdata" merge -o pgo-data/merged.profdata pgo-data/
+
+      - name: Test, then benchmark, under the PGO build
+        run: |
+          cargo test --release --all-features
+          cargo run --release --example compare
+        env:
+          RUSTFLAGS: -C profile-use=${{ github.workspace }}/pgo-data/merged.profdata
+
+  publish:
+    needs: [gates, pgo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Tag and create the GitHub release from the changelog
+        run: |
+          version="${{ github.event.inputs.version }}"
+          .github/workflows/changelog-section.sh "$version" > /tmp/release-notes.md
+          # Append the commit-range link that --generate-notes would have
+          # provided, when there is a previous tag to compare against.
+          git fetch --tags --quiet
+          prev=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -n "$prev" ]; then
+            printf '\n**Full changelog**: https://github.com/%s/compare/%s...v%s\n' \
+              "$GITHUB_REPOSITORY" "$prev" "$version" >> /tmp/release-notes.md
+          fi
+          git tag "v$version"
+          git push origin "v$version"
+          gh release create "v$version" --title "v$version" --notes-file /tmp/release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

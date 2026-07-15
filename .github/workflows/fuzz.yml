@@ -1,0 +1,41 @@
+name: Fuzz
+
+# Long fuzz campaigns: weekly on a schedule, or on demand with a chosen
+# duration. The 60-second smoke runs on every push live in ci.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Minutes per target"
+        default: "15"
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_differential, roundtrip, vs_serde, pointer_differential]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # -rss_limit_mb=8192: ASan bookkeeping (not the targets) accumulates
+      # RSS on long allocation-heavy runs.
+      - run: >
+          cargo fuzz run ${{ matrix.target }} --
+          -max_total_time=$(( 60 * ${{ github.event.inputs.minutes || 15 }} ))
+          -rss_limit_mb=8192
+        env:
+          RUST_BACKTRACE: "1"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

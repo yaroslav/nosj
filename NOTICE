@@ -1,0 +1,52 @@
+nosj
+Copyright (c) 2026 Yaroslav Markin
+
+This crate is licensed MIT AND BSL-1.0 AND Apache-2.0 (SPDX). The MIT
+license (LICENSE) covers the crate as a whole except where a component
+license below applies to derived code. This file itemizes every
+derivative and its provenance.
+
+Derived code
+------------
+
+1. src/grisu2.rs
+   A line-faithful Rust port of fpconv
+   (https://github.com/night-shift/fpconv), including its formatting
+   modifications to Grisu2. License: Boost Software License 1.0,
+   reproduced in LICENSE-BSL-1.0. The Grisu2 algorithm itself is from
+   Florian Loitsch, "Printing Floating-Point Numbers Quickly and
+   Accurately with Integers" (PLDI 2010).
+
+2. src/float.rs and src/el_table.rs
+   Correctly rounded decimal-to-double conversion (the Clinger exact
+   fast path and the Eisel-Lemire algorithm with its 128-bit
+   powers-of-five table) ported from fast_float
+   (https://github.com/fastfloat/fast_float) and fast_double_parser
+   (https://github.com/lemire/fast_double_parser), Daniel Lemire et
+   al. Upstream is dual-licensed Apache-2.0/MIT; this crate uses it
+   under Apache-2.0, reproduced in LICENSE-APACHE-2.0.
+
+3. src/stage1.rs
+   Structural-indexing techniques from simdjson
+   (https://github.com/simdjson/simdjson), Daniel Lemire, Geoff
+   Langdale and contributors: the odd/even backslash-run escape
+   resolution, the shufti nibble-table character classification and
+   its class-bit tables, and the unconditional-write bit-flatten
+   loop. License: Apache-2.0, reproduced in LICENSE-APACHE-2.0.
+
+4. The eight-digit multiply-reduce integer parser in src/scalars.rs
+   (parse_8digits_le), from the fast_float / simdjson lineage. Covered
+   with item 2/3 under LICENSE-APACHE-2.0.
+
+Architectural lineage (ideas, no copied code)
+---------------------------------------------
+
+- src/cursor.rs follows the fused single-pass byte-cursor architecture
+  proven by yyjson (https://github.com/ibireme/yyjson, MIT).
+- The two-stage index-then-drive pipeline follows the design described
+  in "Parsing Gigabytes of JSON per Second" (Langdale & Lemire, 2019)
+  and implemented by simdjson and simd-json
+  (https://github.com/simd-lite/simd-json).
+- Escape-emission branch layout conclusions were reached independently
+  and later found to match sonic-rs
+  (https://github.com/cloudwego/sonic-rs, Apache-2.0).

@@ -1,0 +1,95 @@
+[package]
+name = "nosj"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["Yaroslav Markin <yaroslav@markin.net>"]
+# MIT overall; src/grisu2.rs is a port of Boost-licensed fpconv
+# (LICENSE-BSL-1.0), and the fast_float/simdjson-derived float and
+# stage-1 code is Apache-2.0 (LICENSE-APACHE-2.0). Derivatives are
+# itemized in NOTICE.
+license = "MIT AND BSL-1.0 AND Apache-2.0"
+description = "Pull, push and fused-cursor JSON parsers plus a streaming writer, for hosts that build native values during the parse — SIMD-accelerated (NEON, SSE2, runtime-detected AVX2)"
+repository = "https://github.com/yaroslav/nosj"
+documentation = "https://docs.rs/nosj"
+readme = "README.md"
+keywords = ["json", "parser", "simd", "writer", "sax"]
+categories = ["parser-implementations", "encoding"]
+# Whitelist what ships to crates.io: sources, the examples (kernel_bench
+# and the el_table generator), docs and license. Excludes CI and .cargo
+# dev config automatically.
+include = [
+    "src/**",
+    "examples/**",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "LICENSE-BSL-1.0",
+    "LICENSE-APACHE-2.0",
+    "NOTICE",
+]
+
+[dependencies]
+fast-float2 = "0.2.3"
+itoa = "1.0.18"
+zmij = { version = "1.0.21", optional = true }
+
+# Standalone builds (tests, kernel_bench) use the same codegen settings the
+# downstream host builds this crate with — benchmark numbers stay comparable.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+# docs.rs builds pass --cfg docsrs to enable doc(cfg(...)) annotations.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Every unsafe block carries a preceding SAFETY: proof.
+undocumented_unsafe_blocks = "warn"
+# Performance-kernel idioms this crate uses deliberately:
+inline_always = "allow"            # hot leaf functions; measured
+cast_possible_truncation = "allow" # u32 offsets / mask math, bounds guaranteed by construction
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+unreadable_literal = "allow"       # SWAR constants and generated tables
+too_many_lines = "allow"           # state machines are clearer unsplit
+missing_errors_doc = "allow"       # error conditions documented on the error types
+missing_panics_doc = "allow"       # only internal-invariant expects; no input-reachable panics
+similar_names = "allow"
+wildcard_imports = "allow"         # std::arch intrinsics modules, the textbook exception
+doc_markdown = "allow"             # prose mentions simdjson/NEON/etc.; backticking hurts readability
+verbose_bit_mask = "allow"         # `x & 255 == 0` reads better than trailing_zeros() >= 8
+cast_precision_loss = "allow"      # u64->f64 in Clinger path is guarded by w < 2^53
+many_single_char_names = "allow"   # s/i/b/w/dst in byte kernels; longer names hurt density
+
+[dev-dependencies]
+jiter = "0.16.0"
+json = "0.12.4"
+json-steroids = "0.3.1"
+serde_json = "1.0.150"
+simd-json = "0.17.3"
+sonic-rs = "0.5.8"
+
+# asmjson's hand-written assembly uses ELF directives and cannot assemble
+# for x86_64 macOS (the Rosetta test target); everywhere else it builds
+# (on non-x86_64 it uses its fallback path).
+[target.'cfg(not(all(target_arch = "x86_64", target_os = "macos")))'.dev-dependencies]
+asmjson = "0.2.6"
+
+[features]
+# Opt-in shortest-round-trip float output for the Writer (zmij/Schubfach).
+# ~2x faster than the default on float-dominated documents, but the bytes
+# differ from the crate's pinned fpconv format.
+shortest-floats = ["dep:zmij"]

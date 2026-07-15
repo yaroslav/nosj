@@ -1,0 +1,49 @@
+[package]
+name = "nosj-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+# float_roundtrip: serde_json's default float parsing is documented as
+# possibly 1 ULP off, and the differential found exactly that within
+# seconds (11e199). With the feature both sides are correctly rounded and
+# bit equality is a valid oracle.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+nosj = { path = ".." }
+
+# Prevent this from being interpreted as part of a parent workspace.
+[workspace]
+
+[[bin]]
+name = "parse_differential"
+path = "fuzz_targets/parse_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vs_serde"
+path = "fuzz_targets/vs_serde.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pointer_differential"
+path = "fuzz_targets/pointer_differential.rs"
+test = false
+doc = false
+bench = false

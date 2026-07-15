@@ -1,0 +1,5 @@
+# Dev-machine convenience only (not packaged): match the codegen the crate
+# is benchmarked with on Apple Silicon. x86 builds stay generic — SIMD tiers
+# are runtime-detected, never compile-flagged.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
