@@ -64,11 +64,11 @@ jobs:
       - run: cargo publish --dry-run
 
   # Production consumers compile this crate under profile-guided
-  # optimization, so the release gate builds it the same way: train on
-  # the benchmark corpus, rebuild with the merged profile, and run the
-  # full test suite against the PGO codegen. The PGO'd benchmark run at
-  # the end is informational only (shared runners are noisy) — the gate
-  # is that the tests pass.
+  # optimization, so the release gate must prove the test suite passes
+  # under PGO codegen too (instrumented and profile-optimized builds
+  # take different compiler paths). This is a correctness gate, not a
+  # benchmark: training uses a three-file subset that covers the string,
+  # float, and escape-heavy shapes, and nothing is timed.
   pgo:
     runs-on: ubuntu-latest
     steps:
@@ -77,8 +77,8 @@ jobs:
         with:
           components: llvm-tools
 
-      - name: Build instrumented and train on the benchmark corpus
-        run: cargo run --release --example compare
+      - name: Build instrumented and train on a corpus subset
+        run: cargo run --release --example compare twitter canada tolstoy
         env:
           RUSTFLAGS: -C profile-generate=${{ github.workspace }}/pgo-data
 
@@ -88,10 +88,8 @@ jobs:
           test -x "$profdata" || { echo "llvm-profdata not found in the sysroot" >&2; exit 1; }
           "$profdata" merge -o pgo-data/merged.profdata pgo-data/
 
-      - name: Test, then benchmark, under the PGO build
-        run: |
-          cargo test --release --all-features
-          cargo run --release --example compare
+      - name: Run the test suite under the PGO build
+        run: cargo test --release --all-features
         env:
           RUSTFLAGS: -C profile-use=${{ github.workspace }}/pgo-data/merged.profdata
 
