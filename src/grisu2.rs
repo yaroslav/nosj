@@ -165,19 +165,15 @@ fn get_normalized_boundaries(fp: &Fp, lower: &mut Fp, upper: &mut Fp) {
 }
 
 fn multiply(a: &Fp, b: &Fp) -> Fp {
-    const LOMASK: u64 = 0x0000_0000_FFFF_FFFF;
-
-    let ah_bl = (a.frac >> 32) * (b.frac & LOMASK);
-    let al_bh = (a.frac & LOMASK) * (b.frac >> 32);
-    let al_bl = (a.frac & LOMASK) * (b.frac & LOMASK);
-    let ah_bh = (a.frac >> 32) * (b.frac >> 32);
-
-    let mut tmp = (ah_bl & LOMASK) + (al_bh & LOMASK) + (al_bl >> 32);
-    // round up
-    tmp += 1 << 31;
-
+    // The C source assembles the rounded high half from four 32-bit
+    // partial products (it predates portable 128-bit arithmetic). A
+    // single widening multiply computes the identical value: adding
+    // 2^63 before taking the high 64 bits is exactly the C code's
+    // `tmp += 1 << 31` carry at the 2^32 scale. One mul on x86-64
+    // instead of four.
+    let product = u128::from(a.frac) * u128::from(b.frac);
     Fp {
-        frac: ah_bh + (ah_bl >> 32) + (al_bh >> 32) + (tmp >> 32),
+        frac: ((product + (1u128 << 63)) >> 64) as u64,
         exp: a.exp + b.exp + 64,
     }
 }
@@ -210,6 +206,12 @@ fn generate_digits(fp: &Fp, upper: &Fp, lower: &Fp, digits: &mut [u8; 18], k: &m
     let mut idx = 0usize;
     let mut kappa: i32 = 10;
 
+    // Tried and rejected (2026-07-15, Zen 4): unrolling this loop with
+    // per-iteration constant divisors so the divisions strength-reduce
+    // to multiply-shifts. Isolated write_f64 52.4 -> 53.9 ns/float and
+    // in-context generation unchanged: rustc already handles the
+    // division well, and the tenfold early-exit duplication costs more
+    // than it saves.
     // 1000000000
     let mut div_i = 10usize;
     while kappa > 0 {
@@ -292,17 +294,56 @@ fn grisu2(d: f64, digits: &mut [u8; 18], k: &mut i32) -> usize {
     generate_digits(&w, &upper, &lower, digits, k)
 }
 
-fn emit_digits(digits: &[u8], k: i32, neg: bool, dest: &mut Vec<u8>) {
+/// The C API's stated worst case is 25 bytes including sign (this
+/// port's widest path is 29: sign + "0." + nine zeros + 17 digits);
+/// reserving 32 mirrors the C callers and keeps every emit path below
+/// covered, debug-asserted at each write.
+pub(crate) const DTOA_MAX: usize = 32;
+
+/// Raw output cursor over the caller's `DTOA_MAX` reservation: plain
+/// stores instead of per-write capacity checks, the C source's `char*`
+/// writer shape. This is what the json gem's C generator does
+/// (`fbuffer_inc_capa(32)` then formatting through a raw pointer), and
+/// the earlier safe variants measurably were not: per-push `Vec`
+/// capacity branches cost ~5%, and `extend_from_slice`'s libc memmove
+/// calls cost 42% of float-heavy generation on Zen 4.
+struct Cursor {
+    base: *mut u8,
+    at: usize,
+}
+
+impl Cursor {
+    #[inline(always)]
+    fn push(&mut self, b: u8) {
+        debug_assert!(self.at < DTOA_MAX);
+        // SAFETY: `base` has DTOA_MAX writable bytes (dtoa's
+        // reservation) and every path stays under it (asserted above).
+        unsafe { self.base.add(self.at).write(b) };
+        self.at += 1;
+    }
+
+    #[inline(always)]
+    fn extend(&mut self, bytes: &[u8]) {
+        debug_assert!(self.at + bytes.len() <= DTOA_MAX);
+        // SAFETY: `bytes.len()` readable source bytes; the DTOA_MAX
+        // reservation leaves enough writable room (asserted above);
+        // the stack digits buffer and the destination cannot overlap.
+        unsafe { crate::scan::copy_small(bytes.as_ptr(), self.base.add(self.at), bytes.len()) };
+        self.at += bytes.len();
+    }
+}
+
+fn emit_digits(digits: &[u8], k: i32, neg: bool, dest: &mut Cursor) {
     let ndigits = digits.len() as i32;
     let mut exp = (k + ndigits - 1).abs();
 
     // plain integer, with ".0" appended (the fpconv modification)
     if k >= 0 && exp < 15 {
-        dest.extend_from_slice(digits);
+        dest.extend(digits);
         for _ in 0..k {
             dest.push(b'0');
         }
-        dest.extend_from_slice(b".0");
+        dest.extend(b".0");
         return;
     }
 
@@ -310,15 +351,15 @@ fn emit_digits(digits: &[u8], k: i32, neg: bool, dest: &mut Vec<u8>) {
     if k < 0 && (k > -7 || exp < 10) {
         let offset = ndigits - k.abs();
         if offset <= 0 {
-            dest.extend_from_slice(b"0.");
+            dest.extend(b"0.");
             for _ in 0..-offset {
                 dest.push(b'0');
             }
-            dest.extend_from_slice(digits);
+            dest.extend(digits);
         } else {
-            dest.extend_from_slice(&digits[..offset as usize]);
+            dest.extend(&digits[..offset as usize]);
             dest.push(b'.');
-            dest.extend_from_slice(&digits[offset as usize..]);
+            dest.extend(&digits[offset as usize..]);
         }
         return;
     }
@@ -328,7 +369,7 @@ fn emit_digits(digits: &[u8], k: i32, neg: bool, dest: &mut Vec<u8>) {
     dest.push(digits[0]);
     if ndigits > 1 {
         dest.push(b'.');
-        dest.extend_from_slice(&digits[1..ndigits]);
+        dest.extend(&digits[1..ndigits]);
     }
     dest.push(b'e');
     dest.push(if k + ndigits as i32 - 1 < 0 {
@@ -353,19 +394,41 @@ fn emit_digits(digits: &[u8], k: i32, neg: bool, dest: &mut Vec<u8>) {
     dest.push(b'0' + (exp % 10) as u8);
 }
 
-/// Append `d` in the fpconv format. `d` must be finite; non-finite values
-/// are the caller's policy decision.
-pub(crate) fn dtoa(d: f64, dest: &mut Vec<u8>) {
+/// Write `d` in the fpconv format directly at `dst`, returning the
+/// byte count.
+///
+/// # Safety
+///
+/// `dst` must have [`DTOA_MAX`] writable bytes. `d` must be finite
+/// (debug-asserted); non-finite values are the caller's policy
+/// decision.
+pub(crate) unsafe fn dtoa_raw(d: f64, dst: *mut u8) -> usize {
     debug_assert!(d.is_finite());
+    let mut cur = Cursor { base: dst, at: 0 };
     if d.to_bits() & SIGNMASK != 0 {
-        dest.push(b'-');
+        cur.push(b'-');
     }
     if d == 0.0 {
-        dest.extend_from_slice(b"0.0");
-        return;
+        cur.extend(b"0.0");
+    } else {
+        let mut digits = [0u8; 18];
+        let mut k = 0i32;
+        let ndigits = grisu2(d, &mut digits, &mut k);
+        emit_digits(&digits[..ndigits], k, d < 0.0, &mut cur);
     }
-    let mut digits = [0u8; 18];
-    let mut k = 0i32;
-    let ndigits = grisu2(d, &mut digits, &mut k);
-    emit_digits(&digits[..ndigits], k, d < 0.0, dest);
+    cur.at
+}
+
+/// Append `d` in the fpconv format. `d` must be finite; non-finite values
+/// are the caller's policy decision.
+pub(crate) fn dtoa<B: crate::emit::EmitBuf>(d: f64, dest: &mut B) {
+    dest.reserve(DTOA_MAX);
+    // SAFETY: the reservation above provides DTOA_MAX writable bytes at
+    // the tail; the cursor's writes are individually asserted under
+    // that bound, so `set_len` covers exactly the initialized bytes.
+    unsafe {
+        let len = dest.len();
+        let n = dtoa_raw(d, dest.as_mut_ptr().add(len));
+        dest.set_len(len + n);
+    }
 }

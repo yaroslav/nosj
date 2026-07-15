@@ -77,8 +77,11 @@ jobs:
         with:
           components: llvm-tools
 
+      # numbers is in the set deliberately: without it the float-parse
+      # loop layout regresses ~25% on pure-float documents (measured on
+      # Zen 4, 2026-07-15).
       - name: Build instrumented and train on a corpus subset
-        run: cargo run --release --example compare twitter canada tolstoy
+        run: cargo run --release --example compare twitter canada tolstoy numbers
         env:
           RUSTFLAGS: -C profile-generate=${{ github.workspace }}/pgo-data
 

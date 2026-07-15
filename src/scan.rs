@@ -244,10 +244,11 @@ pub(crate) mod neon {
 pub(crate) mod x86 {
     use super::{MODE_ASCII_ONLY, MODE_SCRIPT_SAFE};
     use std::arch::x86_64::{
-        __m128i, __m256i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8, _mm_movemask_epi8,
-        _mm_or_si128, _mm_set1_epi8, _mm_storeu_si128, _mm256_cmpeq_epi8, _mm256_loadu_si256,
-        _mm256_min_epu8, _mm256_movemask_epi8, _mm256_or_si256, _mm256_set1_epi8,
-        _mm256_storeu_si256,
+        __m128i, __m256i, __m512i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8,
+        _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8, _mm_storeu_si128, _mm256_cmpeq_epi8,
+        _mm256_loadu_si256, _mm256_min_epu8, _mm256_movemask_epi8, _mm256_or_si256,
+        _mm256_set1_epi8, _mm256_storeu_si256, _mm512_cmpeq_epi8_mask, _mm512_cmplt_epu8_mask,
+        _mm512_loadu_si512, _mm512_movepi8_mask, _mm512_set1_epi8, _mm512_storeu_si512,
     };
 
     /// Needs-attention movemask for 16 bytes (1 bit per byte).
@@ -343,6 +344,48 @@ pub(crate) mod x86 {
             let v = _mm256_loadu_si256(src.cast());
             _mm256_storeu_si256(dst.cast(), v);
             u64::from(avx2_hit_mask::<MODE>(v))
+        }
+    }
+
+    /// Needs-attention mask for 64 bytes, straight into a `__mmask64`:
+    /// AVX-512BW compares produce mask registers natively, so there is
+    /// no movemask step and the unsigned control-byte compare exists
+    /// directly. Callers must have verified AVX-512BW at runtime.
+    /// Currently undispatched (emission rejected it; see emit.rs);
+    /// kept for scan-only consumers.
+    #[target_feature(enable = "avx512bw")]
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) unsafe fn avx512_hit_mask<const MODE: u8>(v: __m512i) -> u64 {
+        let mut mask = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'"' as i8))
+            | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'\\' as i8))
+            | _mm512_cmplt_epu8_mask(v, _mm512_set1_epi8(0x20));
+        if MODE == MODE_SCRIPT_SAFE {
+            mask |= _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'/' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(0xE2u8 as i8));
+        }
+        if MODE == MODE_ASCII_ONLY {
+            // The sign bit doubles as the >= 0x80 test.
+            mask |= _mm512_movepi8_mask(v) as u64;
+        }
+        mask
+    }
+
+    /// AVX-512 [`sse2_copy_scan`]: 64 bytes per step.
+    ///
+    /// # Safety
+    ///
+    /// 64 readable bytes at `src`, 64 writable bytes at `dst`;
+    /// AVX-512BW verified at runtime by the dispatch site.
+    #[target_feature(enable = "avx512bw")]
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) unsafe fn avx512_copy_scan<const MODE: u8>(src: *const u8, dst: *mut u8) -> u64 {
+        // SAFETY: per this function's contract.
+        unsafe {
+            let v = _mm512_loadu_si512(src.cast());
+            _mm512_storeu_si512(dst.cast(), v);
+            avx512_hit_mask::<MODE>(v)
         }
     }
 

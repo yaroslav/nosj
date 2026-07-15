@@ -1,3 +1,47 @@
+## [0.1.1]
+
+Performance, measured on real x86 silicon (AWS EC2 c7a.2xlarge, AMD
+EPYC 9R14, Zen 4)—the first hardware validation of the runtime-detected
+AVX2 paths (all tests and fuzz targets pass unchanged):
+
+- Escape emission now routes strings shorter than 16 bytes to the
+  16-byte SSE2 loop instead of the AVX2 masked-tail path: the wide
+  path's entry overhead made 10-11 byte escapes (object keys
+  especially) ~32% slower. Long and unicode-heavy strings keep the
+  AVX2 kernel and its 2.2-2.5x advantage.
+- The Grisu2 power-of-ten multiply uses a single 128-bit widening
+  multiply instead of the C source's four 32-bit partial products
+  (bit-identical rounding, pinned by the fpconv byte tests):
+  `write_f64` ~10% faster.
+- Float formatting writes through a raw cursor over one 32-byte
+  reservation (the C sources' `char*` writer shape) instead of
+  per-write `Vec` operations: the small variable-length slice copies
+  compiled to libc memmove calls that measured 42% of float-heavy
+  generation. Identical bytes; `write_f64` 219→188ns per 5 mixed
+  floats end to end.
+- AVX-512BW scan primitives (64-byte hit-mask and copy-scan) land
+  undispatched: escape *emission* rejected them on corpus evidence
+  (every escape restarts the wide loop), but scan-only consumers can
+  pick them up.
+- New `emit::EmitBuf` trait: the emission kernels (`escape_into`,
+  `write_i64`, `write_f64`, `push_short`) are now generic over a
+  raw-capacity byte sink with `Vec<u8>`'s contract, so hosts can point
+  them at foreign buffers. `Vec<u8>` implements it; existing callers
+  compile unchanged. The escape slow path now publishes its
+  speculative prefix before any mid-kernel reserve, making the
+  growth-preservation contract explicit.
+- New `emit::write_f64_raw` / `emit::write_i64_raw` (with
+  `F64_MAX_LEN` / `I64_MAX_LEN`): the number writers through a raw
+  pointer, the C calling convention, for hosts that batch numeric runs
+  under one reservation and keep the write cursor in a register.
+  Measured in the Ruby host on Zen 4: flipped every float-dominated
+  generation benchmark from behind to ahead of the C reference.
+- Integers are written backward in place from a precomputed digit
+  count (two-digit table), replacing the itoa dependency: the staging
+  buffer plus copy-out measured ~25% slower per integer on int-dense
+  generation. One dependency fewer; bytes identical, pinned by a
+  digit-boundary test.
+
 ## [0.1.0]
 
 Initial release.

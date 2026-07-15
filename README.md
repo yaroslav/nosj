@@ -1,5 +1,9 @@
 # nosj
 
+**The fastest JSON parser on 11 of 13 classic-corpus files: 2-19x
+serde_json, ahead of sonic-rs and simd-json, up to 12 GB/s—[see
+Benchmarks](#benchmarks).**
+
 nosj is a SIMD-accelerated JSON parser and writer that never builds its
 own values. It hands you **events**—object begins, keys, strings,
 numbers—and you build your structure directly: a runtime's heap
@@ -110,72 +114,76 @@ deepest member. Misses are `Ok(None)` (`serde_json::Value::pointer`
 semantics); skipped interiors are bracket-balance-checked, the resolved
 target fully validated.
 
-µs per query, Apple M-series (`examples/pointer_bench`):
+µs per query, AWS EC2 c7a.2xlarge (AMD EPYC 9R14, Zen 4;
+`examples/pointer_bench`):
 
 | shape | nosj pointer | sonic-rs get | serde parse+pointer |
 |---|---:|---:|---:|
-| twitter early (`/statuses/0/id`) | 0.2 | 0.2 | 1262.5 |
-| twitter late (`/statuses/95/user/screen_name`) | **104.9** | 427.8 | 1263.2 |
-| citm deep (`/performances/40/.../areaId`) | **69.8** | 228.1 | 2481.0 |
+| twitter early (`/statuses/0/id`) | 0.1 | 0.2 | 1723.9 |
+| twitter late (`/statuses/95/user/screen_name`) | **58.5** | 220.1 | 1715.7 |
+| citm deep (`/performances/40/.../areaId`) | **45.9** | 128.4 | 3875.2 |
 
 | nosj pointers (batch of 5) | nosj pointer ×5 (sequential) | sonic-rs get_many |
 |---:|---:|---:|
-| **109.4** | 347.8 | 435.9 |
+| **66.3** | 217.3 | 238.4 |
 
 ## Benchmarks
 
 `cargo run --release --features shortest-floats --example compare`:
 alternating round-robin blocks over `benchmark/` (the classic simdjson
 corpus plus real-world payloads), MB/s, higher is better, whole-binary
-PGO with every contender trained equally. Apple M-series, rustc 1.97.0,
-2026-07-15; x86 numbers pending real hardware.
+PGO with every contender trained equally. AWS EC2 c7a.2xlarge
+(AMD EPYC 9R14, Zen 4; AVX2 paths active), rustc 1.97.0, 2026-07-16.
 
 nosj appears more than once because it has no DOM: **events** drives
 the fused cursor into a non-allocating sink (the design point);
 **tree** builds a naive owned `Vec`/`String` tree so the comparison
 with DOM libraries is apples-to-apples; **shortest floats** is the same
 tree with the opt-in `FloatFormat::Shortest` instead of pinned fpconv
-bytes. Parse events mode leads on 11 of 13 files, generation on 11 of
-13 counting shortest-floats where floats dominate.
+bytes. Parse events mode is the fastest parser on 11 of 13 files
+(2-19x serde_json, up to 12 GB/s on tolstoy). Generation beats
+serde_json on all 13 (counting shortest-floats where floats
+dominate); sonic-rs's x86 serializer takes most string-heavy files
+end-to-end.
 
 ### Parse (MB/s)
 
 | file | nosj (events) | nosj (tree) | serde_json | sonic-rs | simd-json | simd-json (borrowed) | jiter | json-rust | json-steroids | asmjson |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| activitypub | 2183 | 901 | 645 | **2282** | 695 | 1039 | 1016 | 679 | 612 |—|
-| canada | **1276** | 773 | 534 | 1173 | 419 | 420 | 401 | 658 | 488 | 940 |
-| citm_catalog | **3173** | 979 | 765 | 2293 | 856 | 1120 | 993 | 910 | 852 | 1544 |
-| gsoc-2018 | **5144** | 1920 | 1297 | 4517 | 1300 | 2038 | 2503 | 1012 | 891 |—|
-| homebrew-formula | **2412** | 596 | 413 | 2123 | 445 | 709 | 1023 | 690 | 534 |—|
-| homebrew-llvm | 2320 | 1721 | 1389 | **3741** | 1118 | 1292 | 1905 | 1362 | 1377 | 811 |
-| mesh | **1116** | 917 | 402 | 914 | 684 | 684 | 686 | 816 | 583 | 768 |
-| numbers | **1139** | 997 | 590 | 1010 | 947 | 953 | 901 | 840 | 701 | 859 |
-| ohai | **1627** | 570 | 353 | 1453 | 556 | 1029 | 1028 | 564 | 540 | 1184 |
-| simple | **1212** | 363 | 293 | 788 | 275 | 372 | 559 | 529 | 451 | 600 |
-| small_mixed | **534** | 151 | 200 | 271 | 107 | 120 | 195 | 189 | 227 | 213 |
-| tolstoy | **13670** | 11058 | 4505 | 9600 | 2084 | 2163 | 314 | 1128 | 443 | 488 |
-| twitter | **2422** | 853 | 518 | 2036 | 661 | 1196 | 993 | 830 | 632 |—|
+| activitypub | **3080** | 672 | 512 | 2123 | 430 | 608 | 708 | 583 | 441 |—|
+| canada | **1110** | 592 | 348 | 1014 | 348 | 350 | 346 | 566 | 364 | 959 |
+| citm_catalog | **3317** | 822 | 567 | 2162 | 653 | 815 | 862 | 786 | 664 | 1974 |
+| gsoc-2018 | **6666** | 1615 | 1212 | 5278 | 1183 | 2102 | 1315 | 875 | 879 |—|
+| homebrew-formula | **3366** | 313 | 177 | 1654 | 166 | 289 | 422 | 382 | 246 |—|
+| homebrew-llvm | 3475 | 1834 | 1350 | **4123** | 1543 | 2040 | 1427 | 1246 | 1121 | 957 |
+| mesh | **1044** | 673 | 408 | 867 | 479 | 479 | 607 | 615 | 319 | 771 |
+| numbers | 1294 | 978 | 595 | **1321** | 727 | 729 | 938 | 948 | 566 | 956 |
+| ohai | **2229** | 433 | 408 | 1827 | 387 | 779 | 718 | 590 | 356 | 1356 |
+| simple | **1246** | 377 | 367 | 726 | 253 | 357 | 508 | 498 | 414 | 670 |
+| small_mixed | **455** | 153 | 145 | 198 | 105 | 111 | 171 | 183 | 153 | 213 |
+| tolstoy | **12101** | 9584 | 4461 | 11202 | 3496 | 3799 | 368 | 895 | 399 | 485 |
+| twitter | **3166** | 667 | 408 | 2452 | 530 | 955 | 811 | 687 | 484 |—|
 
 ### Generate (MB/s)
 
 | file | nosj (tree) | nosj (shortest floats) | serde_json | sonic-rs | simd-json | json-rust | json-steroids |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| activitypub | 3712 | **3722** | 1570 | 3164 | 1904 | 1587 | 1843 |
-| canada | 352 | **845** | 801 | 816 | 792 | 1616\* | 777 |
-| citm_catalog | 1570 | **1574** | 1167 | 1390 | 1149 | 1269 | 1271 |
-| gsoc-2018 | 6900 | **6972** | 1877 | 6565 | 2963 | 1854 | 2563 |
-| homebrew-formula | 2635 | **2967** | 1017 | 2084 | 1017 | 1269 | 1384 |
-| homebrew-llvm | 2590 | **2619** | 1579 | 2378 | 1433 | 1590 | 1200 |
-| mesh | 394 | 597 | **598** | 562 | 499 | 933\* | 496 |
-| numbers | 328 | **662** | 630 | 629 | 518 | 1218\* | 497 |
-| ohai | 2033 | **2044** | 1034 | 1680 | 1100 | 1118 | 1201 |
-| simple | 1114 | **1118** | 768 | 706 | 769 | 832 | 842 |
-| small_mixed | 475 | **478** | 430 | 402 | 354 | 340 | 355 |
-| tolstoy | 7828 | 7797 | 2402 | **13762** | 4012 | 2125 | 2877 |
-| twitter | 3066 | **3073** | 1483 | 2734 | 1357 | 1576 | 1797 |
+| activitypub | 2372 | 2353 | 1277 | **3317** | 2283 | 1350 | 2531 |
+| canada | 302 | **805** | 766 | 776 | 612 | 1289\* | 613 |
+| citm_catalog | 1077 | 1088 | 876 | **1138** | 1003 | 1068 | 1068 |
+| gsoc-2018 | 4709 | 4745 | 1451 | **7307** | 4110 | 1528 | 4608 |
+| homebrew-formula | **1288** | 1285 | 391 | 1082 | 592 | 661 | 780 |
+| homebrew-llvm | 2870 | 2835 | 1265 | **2934** | 2466 | 1289 | 2595 |
+| mesh | 381 | **681** | 615 | 617 | 440 | 871\* | 427 |
+| numbers | 320 | **715** | 693 | 690 | 465 | 1230\* | 481 |
+| ohai | 1042 | 1048 | 984 | **1574** | 1078 | 1154 | 1200 |
+| simple | 668 | 671 | 667 | 658 | 756 | **888** | 722 |
+| small_mixed | **345** | 341 | 339 | 319 | 330 | 334 | 264 |
+| tolstoy | 9973 | 10085 | 1624 | **18947** | 7275 | 1631 | 907 |
+| twitter | 1626 | 1633 | 1107 | **2374** | 1185 | 1284 | 1190 |
 
 \* json-rust's float output is not byte-faithful. Blank cells: asmjson
-(AVX-512-specialized, running its fallback here) failed those files.
+(here running its native AVX-512 path) failed those files.
 
 ## How it is fast
 

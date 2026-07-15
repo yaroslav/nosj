@@ -65,9 +65,9 @@
 //! assert_eq!(out, b"{\n  \"size\": 3\n}");
 //! ```
 //!
-//! Number formatting is deliberately pinned: integers via `itoa`, floats in
-//! the fpconv (Grisu2) format; see [`emit::write_f64`] for why that differs
-//! from Rust's shortest-round-trip `Display`.
+//! Number formatting is deliberately pinned: integers as plain decimal,
+//! floats in the fpconv (Grisu2) format; see [`emit::write_f64`] for why
+//! that differs from Rust's shortest-round-trip `Display`.
 //!
 //! ## Grammar extensions
 //!

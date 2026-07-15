@@ -28,11 +28,13 @@ pub enum EscapeMode {
 /// strings inside the fused loops and never come here.
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod fallback {
-    use super::{ESCAPE_CLASS, MAX_ESCAPE_EXPANSION, class_bits, push_short, write_escape_run_raw};
+    use super::{
+        ESCAPE_CLASS, EmitBuf, MAX_ESCAPE_EXPANSION, class_bits, push_short, write_escape_run_raw,
+    };
 
     /// SWAR-scan for the next escape, copy the clean span, write the
     /// escape run, repeat.
-    pub(super) fn escape<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
+    pub(super) fn escape<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
         let mut i = 0;
         while i < s.len() {
             let next = find_escape::<MODE>(s, i);
@@ -69,18 +71,111 @@ mod fallback {
         from
     }
 
-    /// Vec-front wrapper for [`write_escape_run_raw`]: reserves the run's
-    /// worst case, commits with one `set_len`.
-    fn write_escape_run<const MODE: u8>(out: &mut Vec<u8>, s: &[u8], i: usize) -> usize {
+    /// Buffer-front wrapper for [`write_escape_run_raw`]: reserves the
+    /// run's worst case, commits with one `set_len`.
+    fn write_escape_run<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8], i: usize) -> usize {
         out.reserve(MAX_ESCAPE_EXPANSION * (s.len() - i) + 8);
         // SAFETY: worst case reserved above; `set_len` covers only the
         // bytes the run wrote.
         unsafe {
-            let dst = out.as_mut_ptr().add(out.len());
+            let len = out.len();
+            let dst = out.as_mut_ptr().add(len);
             let (next_i, wrote) = write_escape_run_raw::<MODE>(s, i, dst);
-            out.set_len(out.len() + wrote);
+            out.set_len(len + wrote);
             next_i
         }
+    }
+}
+
+/// Raw-capacity byte sink for the emission kernels: `Vec<u8>`'s
+/// grow/write/publish contract as a trait, so hosts can point the
+/// kernels at a foreign buffer (an interpreter's string type, an
+/// arena) and skip the final copy out. Method names deliberately
+/// mirror `Vec<u8>`; the kernels monomorphize, so a non-`Vec`
+/// implementation costs nothing.
+///
+/// # Safety
+///
+/// Implementations must uphold what the kernels assume of `Vec<u8>`:
+/// after `reserve(n)`, `as_mut_ptr() + len()` addresses at least `n`
+/// writable bytes that stay valid until the next `reserve`; `len` only
+/// changes through `set_len`; `set_len(l)` publishes exactly the `l`
+/// bytes the caller initialized. Growth must preserve bytes up to
+/// `len()`; bytes past `len()` may be discarded (the kernels publish
+/// speculative prefixes before any mid-flight `reserve`).
+pub unsafe trait EmitBuf {
+    /// Guarantee `additional` writable bytes past `len()`.
+    fn reserve(&mut self, additional: usize);
+    /// Current published length in bytes.
+    fn len(&self) -> usize;
+    /// True when nothing has been published yet.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Base pointer of the buffer (re-derive after every `reserve`:
+    /// growth may relocate storage).
+    fn as_mut_ptr(&mut self) -> *mut u8;
+    /// Publish `new_len` bytes.
+    ///
+    /// # Safety
+    ///
+    /// `new_len` must not exceed reserved capacity and every byte up
+    /// to it must be initialized.
+    unsafe fn set_len(&mut self, new_len: usize);
+
+    /// Append one byte.
+    #[inline(always)]
+    fn push(&mut self, b: u8) {
+        self.reserve(1);
+        // SAFETY: one byte reserved above.
+        unsafe {
+            let len = self.len();
+            self.as_mut_ptr().add(len).write(b);
+            self.set_len(len + 1);
+        }
+    }
+
+    /// Append a slice.
+    #[inline(always)]
+    fn extend_from_slice(&mut self, s: &[u8]) {
+        self.reserve(s.len());
+        // SAFETY: `s.len()` bytes reserved above; the borrow rules
+        // keep `s` disjoint from this buffer's unpublished tail.
+        unsafe {
+            let len = self.len();
+            core::ptr::copy_nonoverlapping(s.as_ptr(), self.as_mut_ptr().add(len), s.len());
+            self.set_len(len + s.len());
+        }
+    }
+}
+
+// SAFETY: Vec<u8> is the reference implementation of the contract;
+// every method delegates to the identically named inherent one.
+unsafe impl EmitBuf for Vec<u8> {
+    #[inline(always)]
+    fn reserve(&mut self, additional: usize) {
+        Vec::reserve(self, additional);
+    }
+    #[inline(always)]
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    #[inline(always)]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        Vec::as_mut_ptr(self)
+    }
+    #[inline(always)]
+    unsafe fn set_len(&mut self, new_len: usize) {
+        // SAFETY: forwarded contract.
+        unsafe { Vec::set_len(self, new_len) };
+    }
+    #[inline(always)]
+    fn push(&mut self, b: u8) {
+        Vec::push(self, b);
+    }
+    #[inline(always)]
+    fn extend_from_slice(&mut self, s: &[u8]) {
+        Vec::extend_from_slice(self, s);
     }
 }
 
@@ -90,7 +185,7 @@ mod fallback {
 /// `extend_from_slice` (hot callers prove the bound; the fallback keeps
 /// this safe for everyone else).
 #[inline(always)]
-pub fn push_short(out: &mut Vec<u8>, s: &[u8]) {
+pub fn push_short<B: EmitBuf>(out: &mut B, s: &[u8]) {
     let n = s.len();
     if n > 16 {
         out.extend_from_slice(s);
@@ -100,8 +195,9 @@ pub fn push_short(out: &mut Vec<u8>, s: &[u8]) {
     // SAFETY: `n <= 16` readable bytes in `s`, 16 writable bytes reserved
     // above; `set_len` covers exactly the `n` written bytes.
     unsafe {
-        crate::scan::copy_small(s.as_ptr(), out.as_mut_ptr().add(out.len()), n);
-        out.set_len(out.len() + n);
+        let len = out.len();
+        crate::scan::copy_small(s.as_ptr(), out.as_mut_ptr().add(len), n);
+        out.set_len(len + n);
     }
 }
 
@@ -129,7 +225,7 @@ macro_rules! fused_scan_store {
         let mut worst_case_reserved = false;
         macro_rules! handle_escape_run {
             () => {{
-                let (next_i, next_w) = escape_run_slow_path::<MODE>(
+                let (next_i, next_w) = escape_run_slow_path::<MODE, B>(
                     $out,
                     $s,
                     i,
@@ -214,11 +310,26 @@ macro_rules! fused_scan_store {
 /// Callers must have verified AVX2 at runtime.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn escape_fused_avx2<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
+unsafe fn escape_fused_avx2<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
     // SAFETY: the macro's loads/stores stay inside `s` / the reservation
     // it makes (see the macro docs); the step is the shared AVX2 kernel,
     // inlined here because this function carries the same feature.
     unsafe { fused_scan_store!(out, s, 32, 1, crate::scan::x86::avx2_copy_scan::<MODE>) }
+}
+
+/// AVX-512BW fused scan+store: 64 bytes per step, mask-register
+/// classification. Callers must have verified AVX-512BW at runtime.
+/// Not dispatched (see the rejection note at `escape_impl`): kept,
+/// with its kernel_bench evidence, for scan-only consumers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+#[allow(dead_code)]
+unsafe fn escape_fused_avx512<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
+    // SAFETY: the macro's loads/stores stay inside `s` / the reservation
+    // it makes (see the macro docs); the step is the shared AVX-512
+    // kernel, inlined here because this function carries the same
+    // feature.
+    unsafe { fused_scan_store!(out, s, 64, 1, crate::scan::x86::avx512_copy_scan::<MODE>) }
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -420,8 +531,8 @@ unsafe fn write_escape_run_raw<const MODE: u8>(
 /// needs a capacity check. Returns the advanced (source, write) cursors;
 /// the caller owns `set_len`.
 #[cold]
-fn escape_run_slow_path<const MODE: u8>(
-    out: &mut Vec<u8>,
+fn escape_run_slow_path<const MODE: u8, B: EmitBuf>(
+    out: &mut B,
     s: &[u8],
     i: usize,
     w: usize,
@@ -431,7 +542,12 @@ fn escape_run_slow_path<const MODE: u8>(
 ) -> (usize, usize) {
     if !*worst_case_reserved {
         let needed = w + MAX_ESCAPE_EXPANSION * (s.len() - i) + width + 8;
-        out.reserve(needed.saturating_sub(out.len()));
+        // Publish the speculative prefix before growing: `reserve` is
+        // only required to preserve bytes up to `len()`, and the fused
+        // loop has initialized everything below `w`.
+        // SAFETY: bytes `0..w` were written by the loop's stores.
+        unsafe { out.set_len(w) };
+        out.reserve(needed.saturating_sub(w));
         *base = out.as_mut_ptr();
         *worst_case_reserved = true;
     }
@@ -441,18 +557,33 @@ fn escape_run_slow_path<const MODE: u8>(
     (next_i, w + wrote)
 }
 
-fn escape_impl<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
+/// Below this length the AVX2 masked-tail entry costs more than the
+/// 16-byte SSE2 loop: measured on Zen 4 (EPYC 9R14), 10-11B escapes run
+/// 14.4ns through the masked tail vs 10.9ns through the 16B loop, while
+/// at 16B+ the wide path wins or ties. Short strings (object keys
+/// especially) dominate real documents, so they take the narrow loop.
+#[cfg(target_arch = "x86_64")]
+const AVX2_MIN_LEN: usize = 16;
+
+// Tried and rejected (2026-07-15, Zen 4): dispatching escape emission
+// to `escape_fused_avx512` for 64B+ input. Clean-string kernel shapes
+// flew (long_clean 123->72ns, unicode 21->12ns), but every escape
+// restarts the wide loop, and the corpus punished that: homebrew-llvm
+// generation (long strings, isolated escapes) -15%, tolstoy flat,
+// dense-escape text -20%. The kernel stays available for scan-only
+// consumers where there is no store/restart cost.
+fn escape_impl<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if s.len() >= AVX2_MIN_LEN && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: AVX2 presence confirmed at runtime.
-        unsafe { escape_fused_avx2::<MODE>(out, s) }
+        unsafe { escape_fused_avx2::<MODE, B>(out, s) }
     } else {
-        escape_fused_16::<MODE>(out, s);
+        escape_fused_16::<MODE, B>(out, s);
     }
     #[cfg(target_arch = "aarch64")]
-    escape_fused_16::<MODE>(out, s);
+    escape_fused_16::<MODE, B>(out, s);
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fallback::escape::<MODE>(out, s);
+    fallback::escape::<MODE, B>(out, s);
 }
 
 /// NEON fused scan+store: 16 bytes per step (see [`fused_scan_store!`]).
@@ -463,7 +594,7 @@ fn escape_impl<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
 /// strings pay for on every call.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn escape_fused_16<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
+fn escape_fused_16<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
     // SAFETY: the macro's loads/stores stay inside `s` / the reservation
     // it makes; see the macro docs.
     unsafe { fused_scan_store!(out, s, 16, 4, crate::scan::neon::copy_scan::<MODE>) }
@@ -473,7 +604,7 @@ fn escape_fused_16<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
 /// `inline(always)` for the same reason as the aarch64 variant.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn escape_fused_16<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
+fn escape_fused_16<const MODE: u8, B: EmitBuf>(out: &mut B, s: &[u8]) {
     // SAFETY: the macro's loads/stores stay inside `s` / the reservation
     // it makes; see the macro docs.
     unsafe { fused_scan_store!(out, s, 16, 1, crate::scan::x86::sse2_copy_scan::<MODE>) }
@@ -481,23 +612,66 @@ fn escape_fused_16<const MODE: u8>(out: &mut Vec<u8>, s: &[u8]) {
 
 /// Append `s` to `out` with JSON string escaping (no surrounding quotes).
 /// `s` must be valid UTF-8 (the host guarantees it, e.g. via coderange).
-pub fn escape_into(out: &mut Vec<u8>, s: &[u8], mode: EscapeMode) {
+pub fn escape_into<B: EmitBuf>(out: &mut B, s: &[u8], mode: EscapeMode) {
     match mode {
-        EscapeMode::Standard => escape_impl::<MODE_STANDARD>(out, s),
-        EscapeMode::ScriptSafe => escape_impl::<MODE_SCRIPT_SAFE>(out, s),
-        EscapeMode::AsciiOnly => escape_impl::<MODE_ASCII_ONLY>(out, s),
+        EscapeMode::Standard => escape_impl::<MODE_STANDARD, B>(out, s),
+        EscapeMode::ScriptSafe => escape_impl::<MODE_SCRIPT_SAFE, B>(out, s),
+        EscapeMode::AsciiOnly => escape_impl::<MODE_ASCII_ONLY, B>(out, s),
     }
+}
+
+/// Two-digit pairs "00".."99", the classic itoa table.
+static DIGIT_PAIRS: [u8; 200] = {
+    let mut t = [0u8; 200];
+    let mut i = 0;
+    while i < 100 {
+        t[i * 2] = b'0' + (i / 10) as u8;
+        t[i * 2 + 1] = b'0' + (i % 10) as u8;
+        i += 1;
+    }
+    t
+};
+
+/// Decimal digit count of `u` (1 for 0): floor(log2) scaled by the
+/// classic 1233/4096 log10(2) approximation, corrected by one
+/// power-of-ten compare.
+#[inline(always)]
+fn decimal_len_u64(u: u64) -> usize {
+    static POW10: [u64; 19] = [
+        10,
+        100,
+        1_000,
+        10_000,
+        100_000,
+        1_000_000,
+        10_000_000,
+        100_000_000,
+        1_000_000_000,
+        10_000_000_000,
+        100_000_000_000,
+        1_000_000_000_000,
+        10_000_000_000_000,
+        100_000_000_000_000,
+        1_000_000_000_000_000,
+        10_000_000_000_000_000,
+        100_000_000_000_000_000,
+        1_000_000_000_000_000_000,
+        10_000_000_000_000_000_000,
+    ];
+    let bits = 63 ^ (u | 1).leading_zeros() as usize;
+    let approx = (bits * 1233) >> 12;
+    approx + 1 + usize::from(u >= POW10[approx])
 }
 
 /// Append an integer.
 #[inline]
-pub fn write_i64(out: &mut Vec<u8>, v: i64) {
-    let mut buf = itoa::Buffer::new();
-    let s = buf.format(v).as_bytes();
-    if s.len() <= 16 {
-        push_short(out, s);
-    } else {
-        out.extend_from_slice(s);
+pub fn write_i64<B: EmitBuf>(out: &mut B, v: i64) {
+    out.reserve(I64_MAX_LEN);
+    // SAFETY: I64_MAX_LEN reserved above covers the widest value.
+    unsafe {
+        let len = out.len();
+        let n = write_i64_raw(out.as_mut_ptr().add(len), v);
+        out.set_len(len + n);
     }
 }
 
@@ -513,14 +687,92 @@ pub fn write_i64(out: &mut Vec<u8>, v: i64) {
 /// for hosts that gate non-finite values themselves, and in release a
 /// non-finite input produces digits of an unrelated finite number. The
 /// [`crate::Writer`] tier enforces finiteness unconditionally.
-pub fn write_f64(out: &mut Vec<u8>, f: f64) {
+pub fn write_f64<B: EmitBuf>(out: &mut B, f: f64) {
     debug_assert!(f.is_finite(), "write_f64 requires a finite value");
     crate::grisu2::dtoa(f, out);
+}
+
+/// Maximum bytes [`write_f64_raw`] writes.
+pub const F64_MAX_LEN: usize = crate::grisu2::DTOA_MAX;
+
+/// [`write_f64`] through a raw pointer, for hosts that batch many
+/// numeric writes under one reservation and keep the cursor in a
+/// register (the C fpconv calling convention). Returns the byte count.
+///
+/// # Safety
+///
+/// `dst` must have [`F64_MAX_LEN`] writable bytes. `f` must be finite
+/// (debug-asserted, same contract as [`write_f64`]).
+pub unsafe fn write_f64_raw(dst: *mut u8, f: f64) -> usize {
+    // SAFETY: forwarded contract.
+    unsafe { crate::grisu2::dtoa_raw(f, dst) }
+}
+
+/// Maximum bytes [`write_i64_raw`] writes ("-9223372036854775808").
+pub const I64_MAX_LEN: usize = 20;
+
+/// [`write_i64`] through a raw pointer; see [`write_f64_raw`] for the
+/// use case. Returns the byte count.
+///
+/// Digits are written backward, in place, from a precomputed length:
+/// no staging buffer and no copy out (routing through a stack itoa
+/// buffer plus a short copy measured ~25% slower per integer on
+/// int-dense generation).
+///
+/// # Safety
+///
+/// `dst` must have [`I64_MAX_LEN`] writable bytes.
+pub unsafe fn write_i64_raw(dst: *mut u8, v: i64) -> usize {
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    // SAFETY: the sign byte plus `decimal_len_u64(u)` digits fit in
+    // the caller's I64_MAX_LEN reservation; `p` walks backward from
+    // the exact end of that span to `digits_start`.
+    unsafe {
+        let mut w = 0usize;
+        if neg {
+            *dst = b'-';
+            w = 1;
+        }
+        let len = decimal_len_u64(u);
+        let digits_start = dst.add(w);
+        let mut p = digits_start.add(len);
+        while u >= 100 {
+            let pair = ((u % 100) as usize) * 2;
+            u /= 100;
+            p = p.sub(2);
+            p.copy_from_nonoverlapping(DIGIT_PAIRS.as_ptr().add(pair), 2);
+        }
+        if u >= 10 {
+            p = p.sub(2);
+            p.copy_from_nonoverlapping(DIGIT_PAIRS.as_ptr().add((u as usize) * 2), 2);
+        } else {
+            p = p.sub(1);
+            *p = b'0' + u as u8;
+        }
+        debug_assert!(p == digits_start);
+        w + len
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_i64_matches_display_across_digit_boundaries() {
+        let mut cases: Vec<i64> = vec![0, i64::MIN, i64::MAX];
+        let mut p: i64 = 1;
+        for _ in 0..18 {
+            p *= 10;
+            cases.extend([p - 1, p, p + 1, -(p - 1), -p, -(p + 1)]);
+        }
+        for v in cases {
+            let mut out = Vec::new();
+            write_i64(&mut out, v);
+            assert_eq!(out, v.to_string().into_bytes(), "value {v}");
+        }
+    }
 
     fn esc(s: &str, mode: EscapeMode) -> String {
         // Exact-size allocation: a tail overread would be out of the
