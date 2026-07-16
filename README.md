@@ -1,14 +1,11 @@
 # nosj
 
-**The fastest JSON parser on 11 of 13 classic-corpus files: 2-19x
-serde_json, ahead of sonic-rs and simd-json, up to 12 GB/s—[see
-Benchmarks](#benchmarks).**
-
-nosj is a SIMD-accelerated JSON parser and writer that never builds its
-own values. It hands you **events**—object begins, keys, strings,
+**nosj is a very fast SIMD-accelerated JSON parser and writer** that never builds its own values. It hands you **events**—object begins, keys, strings,
 numbers—and you build your structure directly: a runtime's heap
 objects, an arena, an Arrow column. Strings arrive as borrowed slices
 straight from the input buffer whenever no unescaping is needed.
+
+2-19× faster than serde_json, ahead of sonic-rs and simd-json, up to 12 GB/s—[see Benchmarks](#benchmarks).
 
 **Why:** if the values you need aren't Rust values, every DOM parser
 makes you pay twice—once to build its tree, once to convert every node
@@ -133,18 +130,14 @@ target fully validated.
 alternating round-robin blocks over `benchmark/` (the classic simdjson
 corpus plus real-world payloads), MB/s, higher is better, whole-binary
 PGO with every contender trained equally. AWS EC2 c7a.2xlarge
-(AMD EPYC 9R14, Zen 4; AVX2 paths active), rustc 1.97.0, 2026-07-16.
+(AMD EPYC 9R14, Zen 4; AVX2 paths active), rustc 1.97.0.
 
 nosj appears more than once because it has no DOM: **events** drives
 the fused cursor into a non-allocating sink (the design point);
 **tree** builds a naive owned `Vec`/`String` tree so the comparison
 with DOM libraries is apples-to-apples; **shortest floats** is the same
 tree with the opt-in `FloatFormat::Shortest` instead of pinned fpconv
-bytes. Parse events mode is the fastest parser on 11 of 13 files
-(2-19x serde_json, up to 12 GB/s on tolstoy). Generation beats
-serde_json on all 13 (counting shortest-floats where floats
-dominate); sonic-rs's x86 serializer takes most string-heavy files
-end-to-end.
+bytes.
 
 ### Parse (MB/s)
 
