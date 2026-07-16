@@ -1,4 +1,4 @@
-## [0.1.1]
+## [0.1.1] - 2026-07-16
 
 Performance, measured on real x86 silicon (AWS EC2 c7a.2xlarge, AMD
 EPYC 9R14, Zen 4)—the first hardware validation of the runtime-detected
@@ -42,7 +42,7 @@ AVX2 paths (all tests and fuzz targets pass unchanged):
   generation. One dependency fewer; bytes identical, pinned by a
   digit-boundary test.
 
-## [0.1.0]
+## [0.1.0] - 2026-07-15
 
 Initial release.
 
