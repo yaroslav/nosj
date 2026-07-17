@@ -38,6 +38,17 @@ entire point of nosj.
 > SIMD path against a scalar model, and continuous byte-for-byte
 > output-parity gates in its host application.
 
+- [Show me](#show-me)
+- [What's in the box](#whats-in-the-box)
+- [Benchmarks](#benchmarks)
+- [How it is fast](#how-it-is-fast)
+- [Where it came from](#where-it-came-from)
+- [UTF-8 contract](#utf-8-contract)
+- [Testing and fuzzing](#testing-and-fuzzing)
+- [Installation](#installation)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
 ## Show me
 
 ```rust
@@ -210,11 +221,12 @@ bytes.
 
 ## Where it came from
 
-nosj was born inside a language-runtime binding that set out to beat
-that runtime's built-in, heavily optimized C JSON library. Parsing
-speed was never the blocker—the post-parse conversion pass was, so
-this crate became the parser that skips it. Exercised end to end by
-its first host, it benchmarks faster than that C implementation across
+nosj was born inside
+[gem nosj](https://github.com/yaroslav/nosj-ruby), a Ruby JSON library
+that set out to beat Ruby's bundled, heavily optimized C `json` gem.
+Parsing speed was never the blocker—the post-parse conversion pass
+was, so this crate became the parser that skips it. Exercised end to
+end by the gem, it benchmarks faster than that C implementation across
 the full classic suite in both directions, with byte-for-byte output
 parity verified continuously.
 
