@@ -404,6 +404,35 @@ impl<'a> Writer<'a> {
 mod tests {
     use super::*;
 
+    /// Every escape mode must flow from `WriteOptions.escape` through
+    /// string emission. Expected strings are assembled from the
+    /// reverse-solidus codepoint so no escaping layer between editor
+    /// and compiler can garble them.
+    #[test]
+    fn escape_modes_flow_through_write_options() {
+        let bs = char::from(0x5C);
+        let html = format!("{bs}u003cp{bs}u003e A {bs}u0026 B");
+        let sep = format!("{bs}u2028");
+        let cases = [
+            (EscapeMode::HtmlSafe, format!("[\"{html} {sep}\"]")),
+            (EscapeMode::HtmlEntities, format!("[\"{html} \u{2028}\"]")),
+            (EscapeMode::JsSeparators, format!("[\"<p> A & B {sep}\"]")),
+            (EscapeMode::Standard, "[\"<p> A & B \u{2028}\"]".to_string()),
+        ];
+        for (mode, expected) in cases {
+            let cfg = WriteOptions {
+                escape: mode,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let mut w = Writer::new(&mut out, &cfg);
+            w.begin_array();
+            w.str("<p> A & B \u{2028}");
+            w.end_array();
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{mode:?}");
+        }
+    }
+
     /// Non-finite floats must fail loudly in every build, never emit
     /// digits of some unrelated finite number.
     #[test]

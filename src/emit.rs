@@ -924,31 +924,21 @@ mod tests {
             for len in 0..=40 {
                 let clean: String = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"[..len].to_string();
                 assert_eq!(esc(&clean, mode), esc_reference(&clean, mode), "len {len}");
-                for pos in 0..len {
-                    let mut bytes = clean.clone().into_bytes();
-                    bytes[pos] = b'"';
-                    let s = String::from_utf8(bytes).unwrap();
-                    assert_eq!(
-                        esc(&s, mode),
-                        esc_reference(&s, mode),
-                        "len {len} quote at {pos}"
-                    );
-                    let mut bytes = clean.clone().into_bytes();
-                    bytes[pos] = b'\n';
-                    let s = String::from_utf8(bytes).unwrap();
-                    assert_eq!(
-                        esc(&s, mode),
-                        esc_reference(&s, mode),
-                        "len {len} newline at {pos}"
-                    );
-                    let mut bytes = clean.clone().into_bytes();
-                    bytes[pos] = b'&';
-                    let s = String::from_utf8(bytes).unwrap();
-                    assert_eq!(
-                        esc(&s, mode),
-                        esc_reference(&s, mode),
-                        "len {len} ampersand at {pos}"
-                    );
+                // Every mode's single-byte specials, planted at every
+                // position (bytes not special under `mode` double as
+                // pass-through coverage).
+                for plant in *b"\"\n&<>/" {
+                    for pos in 0..len {
+                        let mut bytes = clean.clone().into_bytes();
+                        bytes[pos] = plant;
+                        let s = String::from_utf8(bytes).unwrap();
+                        assert_eq!(
+                            esc(&s, mode),
+                            esc_reference(&s, mode),
+                            "len {len} {:?} at {pos}",
+                            plant as char
+                        );
+                    }
                 }
             }
             // Multi-byte content across the tail: lengths that split the
@@ -997,6 +987,43 @@ mod tests {
         // sequences pass through.
         assert_eq!(esc("a/b \u{20AC}", EscapeMode::HtmlSafe), "a/b \u{20AC}");
         assert_eq!(esc("héllo", EscapeMode::HtmlSafe), "héllo");
+    }
+
+    /// `escape_into` is a public bytes API, so a truncated or
+    /// non-separator U+2028-lead sequence at the end of the input must
+    /// pass through untouched, without reading past the buffer, in
+    /// every mode that inspects the continuation bytes.
+    #[test]
+    fn separator_lead_tails_pass_through() {
+        let em_dash = [0xE2, 0x80, 0x94];
+        for mode in [
+            EscapeMode::ScriptSafe,
+            EscapeMode::HtmlSafe,
+            EscapeMode::JsSeparators,
+        ] {
+            for tail in [&[0xE2][..], &[0xE2, 0x80][..], &em_dash[..]] {
+                // Long enough to reach the vector loops before the tail.
+                let mut input = vec![b'x'; 37];
+                input.extend_from_slice(tail);
+                let mut out = Vec::new();
+                escape_into(&mut out, &input, mode);
+                assert_eq!(out, input, "{mode:?} tail {tail:?}");
+            }
+        }
+    }
+
+    /// The public raw-pointer short copy must round-trip every length
+    /// through both its branches (word pairs and the memcpy fallback).
+    #[test]
+    fn copy_short_raw_any_length() {
+        for n in 0..=64 {
+            let src: Vec<u8> = (0..n as u8).collect();
+            let mut dst = vec![0xAA; n];
+            // SAFETY: `n` readable bytes in `src`, `n` writable in
+            // `dst`, distinct allocations.
+            unsafe { copy_short_raw(src.as_ptr(), dst.as_mut_ptr(), n) };
+            assert_eq!(dst, src, "n {n}");
+        }
     }
 
     #[test]

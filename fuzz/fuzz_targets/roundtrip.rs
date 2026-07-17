@@ -7,6 +7,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use nosj::emit::EscapeMode;
 use nosj::{Buffers, Sink, WriteOptions, Writer, parse};
 
 #[derive(Arbitrary, Debug, Clone, PartialEq)]
@@ -21,11 +22,37 @@ enum Value {
 }
 
 /// Layout knobs worth fuzzing: every combination must round-trip.
+/// Escaping is semantics-preserving, so every escape mode must
+/// round-trip to the identical tree too.
 #[derive(Arbitrary, Debug)]
 struct Layout {
     pretty: bool,
     indent_tabs: bool,
     space_before: bool,
+    escape: EscapeChoice,
+}
+
+#[derive(Arbitrary, Debug)]
+enum EscapeChoice {
+    Standard,
+    ScriptSafe,
+    AsciiOnly,
+    HtmlSafe,
+    HtmlEntities,
+    JsSeparators,
+}
+
+impl EscapeChoice {
+    fn mode(&self) -> EscapeMode {
+        match self {
+            EscapeChoice::Standard => EscapeMode::Standard,
+            EscapeChoice::ScriptSafe => EscapeMode::ScriptSafe,
+            EscapeChoice::AsciiOnly => EscapeMode::AsciiOnly,
+            EscapeChoice::HtmlSafe => EscapeMode::HtmlSafe,
+            EscapeChoice::HtmlEntities => EscapeMode::HtmlEntities,
+            EscapeChoice::JsSeparators => EscapeMode::JsSeparators,
+        }
+    }
 }
 
 fn write_value(w: &mut Writer, v: &Value) {
@@ -139,6 +166,7 @@ fuzz_target!(|input: (Value, Layout)| {
     if layout.space_before {
         cfg.space_before = b" ".to_vec();
     }
+    cfg.escape = layout.escape.mode();
 
     let mut out = Vec::new();
     let mut w = Writer::new(&mut out, &cfg);
