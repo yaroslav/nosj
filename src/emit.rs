@@ -7,8 +7,20 @@
 //! crate-internal `scan` module.
 
 use crate::scan::{
-    CLASS_STANDARD, ESCAPE_CLASS, MODE_ASCII_ONLY, MODE_SCRIPT_SAFE, MODE_STANDARD, class_bits,
+    CLASS_STANDARD, ESCAPE_CLASS, JS_SEP_CONT, JS_SEP_LAST_2028, JS_SEP_LAST_2029, JS_SEP_LEAD,
+    MODE_ASCII_ONLY, MODE_HTML_ENTITIES, MODE_HTML_SAFE, MODE_JS_SEPARATORS, MODE_SCRIPT_SAFE,
+    MODE_STANDARD, class_bits,
 };
+
+/// Whether `MODE` escapes the JS line separators U+2028/U+2029.
+const fn escapes_js_separators<const MODE: u8>() -> bool {
+    matches!(MODE, MODE_SCRIPT_SAFE | MODE_HTML_SAFE | MODE_JS_SEPARATORS)
+}
+
+/// Whether `MODE` escapes the HTML-active characters `<`, `>`, `&`.
+const fn escapes_html_entities<const MODE: u8>() -> bool {
+    matches!(MODE, MODE_HTML_SAFE | MODE_HTML_ENTITIES)
+}
 
 /// String escaping variants.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,6 +34,17 @@ pub enum EscapeMode {
     /// Additionally escape all non-ASCII as `\uXXXX` (surrogate pairs for
     /// astral code points), producing 7-bit-clean output.
     AsciiOnly,
+    /// Additionally escape `<`, `>`, `&` (as their `\uXXXX` escapes) and
+    /// U+2028/U+2029, making the output safe to interpolate into HTML
+    /// documents (the profile HTML-embedding frameworks apply to JSON).
+    HtmlSafe,
+    /// Additionally escape only `<`, `>`, `&` (as their `\uXXXX`
+    /// escapes): [`EscapeMode::HtmlSafe`] without the JS line
+    /// separators.
+    HtmlEntities,
+    /// Additionally escape only U+2028/U+2029:
+    /// [`EscapeMode::HtmlSafe`] without the HTML-active characters.
+    JsSeparators,
 }
 
 /// Escaping for hosts without SIMD kernels; SIMD targets handle entire
@@ -198,6 +221,29 @@ pub fn push_short<B: EmitBuf>(out: &mut B, s: &[u8]) {
         let len = out.len();
         crate::scan::copy_small(s.as_ptr(), out.as_mut_ptr().add(len), n);
         out.set_len(len + n);
+    }
+}
+
+/// The raw-pointer counterpart of [`push_short`], for hosts writing
+/// into their own reservations: `n <= 32` copies with a pair of
+/// overlapping word stores instead of a `memcpy` call (tiny-copy call
+/// overhead is measurable on short-string workloads), longer copies
+/// take `copy_nonoverlapping`.
+///
+/// # Safety
+///
+/// `n` readable bytes at `src`, `n` writable bytes at `dst`, and the
+/// two ranges must not overlap.
+#[inline(always)]
+pub unsafe fn copy_short_raw(src: *const u8, dst: *mut u8, n: usize) {
+    // SAFETY: forwarded contract; both branches stay within `n` bytes
+    // at each pointer.
+    unsafe {
+        if n <= 32 {
+            crate::scan::copy_small(src, dst, n);
+        } else {
+            std::ptr::copy_nonoverlapping(src, dst, n);
+        }
     }
 }
 
@@ -482,14 +528,22 @@ unsafe fn write_escape_run_raw<const MODE: u8>(
                 dst.add(w + 1).write(b'/');
                 w += 2;
                 i += 1;
-            } else if MODE == MODE_SCRIPT_SAFE && b == 0xE2 {
-                // U+2028 / U+2029 are E2 80 A8 / E2 80 A9; any other
-                // E2-led sequence passes through unescaped.
-                if s.get(i + 1) == Some(&0x80) && matches!(s.get(i + 2), Some(&(0xA8 | 0xA9))) {
-                    w += write_u16_escape_raw(dst.add(w), 0x2028 + u16::from(s[i + 2] - 0xA8));
+            } else if escapes_html_entities::<MODE>() && (b == b'<' || b == b'>' || b == b'&') {
+                w += write_u16_escape_raw(dst.add(w), u16::from(b));
+                i += 1;
+            } else if escapes_js_separators::<MODE>() && b == JS_SEP_LEAD {
+                // Any lead byte whose continuation is not a separator
+                // passes through unescaped.
+                if s.get(i + 1) == Some(&JS_SEP_CONT)
+                    && matches!(s.get(i + 2), Some(&(JS_SEP_LAST_2028 | JS_SEP_LAST_2029)))
+                {
+                    w += write_u16_escape_raw(
+                        dst.add(w),
+                        0x2028 + u16::from(s[i + 2] - JS_SEP_LAST_2028),
+                    );
                     i += 3;
                 } else {
-                    dst.add(w).write(0xE2);
+                    dst.add(w).write(JS_SEP_LEAD);
                     w += 1;
                     i += 1;
                 }
@@ -617,6 +671,9 @@ pub fn escape_into<B: EmitBuf>(out: &mut B, s: &[u8], mode: EscapeMode) {
         EscapeMode::Standard => escape_impl::<MODE_STANDARD, B>(out, s),
         EscapeMode::ScriptSafe => escape_impl::<MODE_SCRIPT_SAFE, B>(out, s),
         EscapeMode::AsciiOnly => escape_impl::<MODE_ASCII_ONLY, B>(out, s),
+        EscapeMode::HtmlSafe => escape_impl::<MODE_HTML_SAFE, B>(out, s),
+        EscapeMode::HtmlEntities => escape_impl::<MODE_HTML_ENTITIES, B>(out, s),
+        EscapeMode::JsSeparators => escape_impl::<MODE_JS_SEPARATORS, B>(out, s),
     }
 }
 
@@ -821,7 +878,17 @@ mod tests {
                     let _ = write!(out, "\\u{:04x}", c as u32);
                 }
                 '/' if mode == EscapeMode::ScriptSafe => out.push_str("\\/"),
-                '\u{2028}' | '\u{2029}' if mode == EscapeMode::ScriptSafe => {
+                '<' | '>' | '&'
+                    if mode == EscapeMode::HtmlSafe || mode == EscapeMode::HtmlEntities =>
+                {
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                }
+                '\u{2028}' | '\u{2029}'
+                    if matches!(
+                        mode,
+                        EscapeMode::ScriptSafe | EscapeMode::HtmlSafe | EscapeMode::JsSeparators
+                    ) =>
+                {
                     let _ = write!(out, "\\u{:04x}", c as u32);
                 }
                 c if (c as u32) >= 0x80 && mode == EscapeMode::AsciiOnly => {
@@ -850,6 +917,9 @@ mod tests {
             EscapeMode::Standard,
             EscapeMode::ScriptSafe,
             EscapeMode::AsciiOnly,
+            EscapeMode::HtmlSafe,
+            EscapeMode::HtmlEntities,
+            EscapeMode::JsSeparators,
         ] {
             for len in 0..=40 {
                 let clean: String = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"[..len].to_string();
@@ -870,6 +940,14 @@ mod tests {
                         esc(&s, mode),
                         esc_reference(&s, mode),
                         "len {len} newline at {pos}"
+                    );
+                    let mut bytes = clean.clone().into_bytes();
+                    bytes[pos] = b'&';
+                    let s = String::from_utf8(bytes).unwrap();
+                    assert_eq!(
+                        esc(&s, mode),
+                        esc_reference(&s, mode),
+                        "len {len} ampersand at {pos}"
                     );
                 }
             }
@@ -903,6 +981,31 @@ mod tests {
         );
         // Other E2-prefixed sequences pass through.
         assert_eq!(esc("\u{20AC}", EscapeMode::ScriptSafe), "\u{20AC}");
+    }
+
+    #[test]
+    fn html_safe_escapes() {
+        assert_eq!(
+            esc("<script>a && b</script>", EscapeMode::HtmlSafe),
+            "\\u003cscript\\u003ea \\u0026\\u0026 b\\u003c/script\\u003e"
+        );
+        assert_eq!(
+            esc("\u{2028}\u{2029}", EscapeMode::HtmlSafe),
+            "\\u2028\\u2029"
+        );
+        // `/` is NOT escaped in this mode, and other E2-prefixed
+        // sequences pass through.
+        assert_eq!(esc("a/b \u{20AC}", EscapeMode::HtmlSafe), "a/b \u{20AC}");
+        assert_eq!(esc("héllo", EscapeMode::HtmlSafe), "héllo");
+    }
+
+    #[test]
+    fn partial_html_profiles_escape_only_their_set() {
+        assert_eq!(
+            esc("a<b \u{2028}", EscapeMode::HtmlEntities),
+            "a\\u003cb \u{2028}"
+        );
+        assert_eq!(esc("a<b \u{2028}", EscapeMode::JsSeparators), "a<b \\u2028");
     }
 
     #[test]

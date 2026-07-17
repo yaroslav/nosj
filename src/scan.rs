@@ -18,17 +18,35 @@
 pub(crate) const MODE_STANDARD: u8 = 0;
 pub(crate) const MODE_SCRIPT_SAFE: u8 = 1;
 pub(crate) const MODE_ASCII_ONLY: u8 = 2;
+pub(crate) const MODE_HTML_SAFE: u8 = 3;
+pub(crate) const MODE_HTML_ENTITIES: u8 = 4;
+pub(crate) const MODE_JS_SEPARATORS: u8 = 5;
+
+// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (the JS line
+// separators) encode in UTF-8 as E2 80 A8 and E2 80 A9. The modes that
+// escape them scan for the shared lead byte and inspect the two
+// continuation bytes at escape time.
+pub(crate) const JS_SEP_LEAD: u8 = 0xE2;
+pub(crate) const JS_SEP_CONT: u8 = 0x80;
+pub(crate) const JS_SEP_LAST_2028: u8 = 0xA8;
+pub(crate) const JS_SEP_LAST_2029: u8 = 0xA9;
 
 // Per-byte class bits in [`ESCAPE_CLASS`].
 pub(crate) const CLASS_STANDARD: u8 = 1 << 0;
 pub(crate) const CLASS_SCRIPT_SAFE_EXTRA: u8 = 1 << 1;
 pub(crate) const CLASS_ASCII_ONLY_EXTRA: u8 = 1 << 2;
+pub(crate) const CLASS_HTML_SAFE_EXTRA: u8 = 1 << 3;
+pub(crate) const CLASS_HTML_ENTITIES_EXTRA: u8 = 1 << 4;
+pub(crate) const CLASS_JS_SEPARATORS_EXTRA: u8 = 1 << 5;
 
 /// The [`ESCAPE_CLASS`] bits that need attention under `MODE`.
 pub(crate) const fn class_bits<const MODE: u8>() -> u8 {
     match MODE {
         MODE_SCRIPT_SAFE => CLASS_STANDARD | CLASS_SCRIPT_SAFE_EXTRA,
         MODE_ASCII_ONLY => CLASS_STANDARD | CLASS_ASCII_ONLY_EXTRA,
+        MODE_HTML_SAFE => CLASS_STANDARD | CLASS_HTML_SAFE_EXTRA,
+        MODE_HTML_ENTITIES => CLASS_STANDARD | CLASS_HTML_ENTITIES_EXTRA,
+        MODE_JS_SEPARATORS => CLASS_STANDARD | CLASS_JS_SEPARATORS_EXTRA,
         _ => CLASS_STANDARD,
     }
 }
@@ -43,11 +61,20 @@ pub(crate) static ESCAPE_CLASS: [u8; 256] = {
         if b == b'"' || b == b'\\' || b < 0x20 {
             t[i] |= CLASS_STANDARD;
         }
-        if b == b'/' || b == 0xE2 {
+        if b == b'/' || b == JS_SEP_LEAD {
             t[i] |= CLASS_SCRIPT_SAFE_EXTRA;
         }
         if b >= 0x80 {
             t[i] |= CLASS_ASCII_ONLY_EXTRA;
+        }
+        if b == b'<' || b == b'>' || b == b'&' || b == JS_SEP_LEAD {
+            t[i] |= CLASS_HTML_SAFE_EXTRA;
+        }
+        if b == b'<' || b == b'>' || b == b'&' {
+            t[i] |= CLASS_HTML_ENTITIES_EXTRA;
+        }
+        if b == JS_SEP_LEAD {
+            t[i] |= CLASS_JS_SEPARATORS_EXTRA;
         }
         i += 1;
     }
@@ -134,17 +161,29 @@ pub(crate) fn swar_escape_mask<const MODE: u8>(w: u64) -> u64 {
     }
     let mut m = eq(w, b'"') | eq(w, b'\\') | (w.wrapping_sub(LO * 0x20) & !w & HI);
     if MODE == MODE_SCRIPT_SAFE {
-        m |= eq(w, b'/') | eq(w, 0xE2);
+        m |= eq(w, b'/') | eq(w, JS_SEP_LEAD);
     }
     if MODE == MODE_ASCII_ONLY {
         m |= w & HI;
+    }
+    if MODE == MODE_HTML_SAFE {
+        m |= eq(w, b'<') | eq(w, b'>') | eq(w, b'&') | eq(w, JS_SEP_LEAD);
+    }
+    if MODE == MODE_HTML_ENTITIES {
+        m |= eq(w, b'<') | eq(w, b'>') | eq(w, b'&');
+    }
+    if MODE == MODE_JS_SEPARATORS {
+        m |= eq(w, JS_SEP_LEAD);
     }
     m
 }
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod neon {
-    use super::{MODE_ASCII_ONLY, MODE_SCRIPT_SAFE};
+    use super::{
+        JS_SEP_LEAD, MODE_ASCII_ONLY, MODE_HTML_ENTITIES, MODE_HTML_SAFE, MODE_JS_SEPARATORS,
+        MODE_SCRIPT_SAFE,
+    };
     use std::arch::aarch64::{
         uint8x16_t, vceqq_u8, vcgeq_u8, vcltq_u8, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8,
         vreinterpret_u64_u8, vreinterpretq_u16_u8, vshrn_n_u16, vst1q_u8,
@@ -169,11 +208,38 @@ pub(crate) mod neon {
             if MODE == MODE_SCRIPT_SAFE {
                 hit = vorrq_u8(
                     hit,
-                    vorrq_u8(vceqq_u8(v, vdupq_n_u8(b'/')), vceqq_u8(v, vdupq_n_u8(0xE2))),
+                    vorrq_u8(
+                        vceqq_u8(v, vdupq_n_u8(b'/')),
+                        vceqq_u8(v, vdupq_n_u8(JS_SEP_LEAD)),
+                    ),
                 );
             }
             if MODE == MODE_ASCII_ONLY {
                 hit = vorrq_u8(hit, vcgeq_u8(v, vdupq_n_u8(0x80)));
+            }
+            if MODE == MODE_HTML_SAFE {
+                hit = vorrq_u8(
+                    hit,
+                    vorrq_u8(
+                        vorrq_u8(vceqq_u8(v, vdupq_n_u8(b'<')), vceqq_u8(v, vdupq_n_u8(b'>'))),
+                        vorrq_u8(
+                            vceqq_u8(v, vdupq_n_u8(b'&')),
+                            vceqq_u8(v, vdupq_n_u8(JS_SEP_LEAD)),
+                        ),
+                    ),
+                );
+            }
+            if MODE == MODE_HTML_ENTITIES {
+                hit = vorrq_u8(
+                    hit,
+                    vorrq_u8(
+                        vorrq_u8(vceqq_u8(v, vdupq_n_u8(b'<')), vceqq_u8(v, vdupq_n_u8(b'>'))),
+                        vceqq_u8(v, vdupq_n_u8(b'&')),
+                    ),
+                );
+            }
+            if MODE == MODE_JS_SEPARATORS {
+                hit = vorrq_u8(hit, vceqq_u8(v, vdupq_n_u8(JS_SEP_LEAD)));
             }
             hit
         }
@@ -242,7 +308,10 @@ pub(crate) mod neon {
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86 {
-    use super::{MODE_ASCII_ONLY, MODE_SCRIPT_SAFE};
+    use super::{
+        JS_SEP_LEAD, MODE_ASCII_ONLY, MODE_HTML_ENTITIES, MODE_HTML_SAFE, MODE_JS_SEPARATORS,
+        MODE_SCRIPT_SAFE,
+    };
     use std::arch::x86_64::{
         __m128i, __m256i, __m512i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8,
         _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8, _mm_storeu_si128, _mm256_cmpeq_epi8,
@@ -271,9 +340,39 @@ pub(crate) mod x86 {
                     hit,
                     _mm_or_si128(
                         _mm_cmpeq_epi8(v, _mm_set1_epi8(b'/' as i8)),
-                        _mm_cmpeq_epi8(v, _mm_set1_epi8(0xE2u8 as i8)),
+                        _mm_cmpeq_epi8(v, _mm_set1_epi8(JS_SEP_LEAD as i8)),
                     ),
                 );
+            }
+            if MODE == MODE_HTML_SAFE {
+                hit = _mm_or_si128(
+                    hit,
+                    _mm_or_si128(
+                        _mm_or_si128(
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(b'<' as i8)),
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(b'>' as i8)),
+                        ),
+                        _mm_or_si128(
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(b'&' as i8)),
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(JS_SEP_LEAD as i8)),
+                        ),
+                    ),
+                );
+            }
+            if MODE == MODE_HTML_ENTITIES {
+                hit = _mm_or_si128(
+                    hit,
+                    _mm_or_si128(
+                        _mm_or_si128(
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(b'<' as i8)),
+                            _mm_cmpeq_epi8(v, _mm_set1_epi8(b'>' as i8)),
+                        ),
+                        _mm_cmpeq_epi8(v, _mm_set1_epi8(b'&' as i8)),
+                    ),
+                );
+            }
+            if MODE == MODE_JS_SEPARATORS {
+                hit = _mm_or_si128(hit, _mm_cmpeq_epi8(v, _mm_set1_epi8(JS_SEP_LEAD as i8)));
             }
             let mut mask = _mm_movemask_epi8(hit) as u32;
             if MODE == MODE_ASCII_ONLY {
@@ -302,8 +401,41 @@ pub(crate) mod x86 {
                 hit,
                 _mm256_or_si256(
                     _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'/' as i8)),
-                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0xE2u8 as i8)),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(JS_SEP_LEAD as i8)),
                 ),
+            );
+        }
+        if MODE == MODE_HTML_SAFE {
+            hit = _mm256_or_si256(
+                hit,
+                _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'<' as i8)),
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'>' as i8)),
+                    ),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'&' as i8)),
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(JS_SEP_LEAD as i8)),
+                    ),
+                ),
+            );
+        }
+        if MODE == MODE_HTML_ENTITIES {
+            hit = _mm256_or_si256(
+                hit,
+                _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'<' as i8)),
+                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'>' as i8)),
+                    ),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'&' as i8)),
+                ),
+            );
+        }
+        if MODE == MODE_JS_SEPARATORS {
+            hit = _mm256_or_si256(
+                hit,
+                _mm256_cmpeq_epi8(v, _mm256_set1_epi8(JS_SEP_LEAD as i8)),
             );
         }
         let mut mask = _mm256_movemask_epi8(hit) as u32;
@@ -362,7 +494,21 @@ pub(crate) mod x86 {
             | _mm512_cmplt_epu8_mask(v, _mm512_set1_epi8(0x20));
         if MODE == MODE_SCRIPT_SAFE {
             mask |= _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'/' as i8))
-                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(0xE2u8 as i8));
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(JS_SEP_LEAD as i8));
+        }
+        if MODE == MODE_HTML_SAFE {
+            mask |= _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'<' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'>' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'&' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(JS_SEP_LEAD as i8));
+        }
+        if MODE == MODE_HTML_ENTITIES {
+            mask |= _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'<' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'>' as i8))
+                | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'&' as i8));
+        }
+        if MODE == MODE_JS_SEPARATORS {
+            mask |= _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(JS_SEP_LEAD as i8));
         }
         if MODE == MODE_ASCII_ONLY {
             // The sign bit doubles as the >= 0x80 test.
@@ -453,5 +599,8 @@ mod tests {
         check::<MODE_STANDARD>();
         check::<MODE_SCRIPT_SAFE>();
         check::<MODE_ASCII_ONLY>();
+        check::<MODE_HTML_SAFE>();
+        check::<MODE_HTML_ENTITIES>();
+        check::<MODE_JS_SEPARATORS>();
     }
 }

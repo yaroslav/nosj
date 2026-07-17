@@ -1,3 +1,21 @@
+## [0.2.0] - 2026-07-17
+
+- New escape mode `EscapeMode::HtmlSafe`: additionally escapes `<`,
+  `>`, `&` (as their `\uXXXX` escapes) and U+2028/U+2029, producing
+  output safe to interpolate into HTML documents—the profile
+  HTML-embedding frameworks apply to JSON. Fully fused into the escape
+  kernels (SWAR, NEON, SSE2/AVX2, and the undispatched AVX-512
+  primitives), so HTML-safe emission costs the same single pass as any
+  other mode. `/` is not escaped in this mode; other `0xE2`-led
+  sequences (em-dashes, curly quotes) pass through untouched.
+- The two partial profiles ship as modes too: `EscapeMode::HtmlEntities`
+  (only `<`, `>`, `&`) and `EscapeMode::JsSeparators` (only
+  U+2028/U+2029), so hosts toggling the two halves independently never
+  need a post-pass.
+- New `emit::copy_short_raw`: the raw-pointer counterpart of
+  `emit::push_short` (overlapping word stores for `n <= 32`, `memcpy`
+  beyond), for hosts writing into their own reservations.
+
 ## [0.1.1] - 2026-07-16
 
 Performance, measured on real x86 silicon (AWS EC2 c7a.2xlarge, AMD
