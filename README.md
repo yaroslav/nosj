@@ -248,6 +248,33 @@ each target briefly on every push.
 cargo add nosj
 ```
 
+## Acknowledgements
+
+Thanks to [Jean Boussier](https://github.com/byroot),
+[Florian Frank](https://github.com/flori),
+[Hiroshi Shibata](https://github.com/hsbt),
+[Nobuyoshi Nakada](https://github.com/nobu),
+[Étienne Barrié](https://github.com/etiennebarrie), and the other
+authors and maintainers of the [json gem](https://github.com/ruby/json)—for
+their work on the gem itself, for optimization ideas, and for some of
+the JSON documents in the benchmark corpus.
+
+Thanks to the authors of the projects credited in [NOTICE](NOTICE):
+[fpconv](https://github.com/night-shift/fpconv) and Florian
+Loitsch's Grisu2,
+[fast_float](https://github.com/fastfloat/fast_float) and
+[fast_double_parser](https://github.com/lemire/fast_double_parser)
+(Daniel Lemire et al.),
+[simdjson](https://github.com/simdjson/simdjson) (Daniel Lemire, Geoff
+Langdale, and contributors), and the architectural lineage of
+[yyjson](https://github.com/ibireme/yyjson),
+[simd-json](https://github.com/simd-lite/simd-json), and
+[sonic-rs](https://github.com/cloudwego/sonic-rs).
+
+## Assisted by
+
+Claude Fable 5.
+
 ## License
 
 MIT, with two derived components under their upstream licenses (SPDX:
