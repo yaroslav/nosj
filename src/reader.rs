@@ -428,6 +428,48 @@ impl<'j, 'b> Reader<'j, 'b> {
         }
     }
 
+    /// Number of members in the container just opened by the last
+    /// [`next_node`](Self::next_node) that returned [`Node::ObjectStart`] or
+    /// [`Node::ArrayStart`] — pairs for an object, elements for an array. Must
+    /// be called BEFORE the first `object_first_key`/`array_first`, while the
+    /// cursor still sits on the container's first inner token.
+    ///
+    /// Read-only: it does NOT advance the cursor. Intended as a pre-sizing hint
+    /// for hosts that allocate a native container up front (e.g. a Lua table via
+    /// `lua_createtable(narr, nrec)`). Cost is O(container size in tokens): a
+    /// pure index walk mirroring [`skip_container`](Self::skip_container), depth-
+    /// counting brackets and tallying top-level commas. Returns 0 for an empty
+    /// container. On a malformed tail it returns whatever it counted before the
+    /// index ran out — it never parses scalars, so it cannot error.
+    #[must_use]
+    pub fn container_len(&self) -> usize {
+        let indexes = &self.bufs.indexes;
+        // Empty container: the first inner token is already the closer.
+        match indexes.get(self.pos).map(|&off| self.input[off as usize]) {
+            Some(b'}' | b']') => return 0,
+            None => return 0,
+            _ => {}
+        }
+        let mut depth = 1usize;
+        let mut commas = 0usize;
+        let mut i = self.pos;
+        while let Some(&off) = indexes.get(i) {
+            i += 1;
+            match self.input[off as usize] {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => commas += 1,
+                _ => {}
+            }
+        }
+        commas + 1
+    }
+
     /// Assert the document is complete (no trailing tokens).
     #[inline]
     pub fn finish(&mut self) -> Result<(), ParseError> {
@@ -444,6 +486,31 @@ impl<'j, 'b> Reader<'j, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_len_counts_top_level_members() {
+        let mut bufs = Buffers::new();
+        let cases: &[(&str, usize)] = &[
+            ("[]", 0),
+            ("{}", 0),
+            ("[1]", 1),
+            (r#"{"x":1}"#, 1),
+            ("[1,2,3]", 3),
+            (r#"{"a":1,"b":2}"#, 2),
+            ("[[1,2],[3]]", 2),           // nested arrays: 2 top-level elements
+            (r#"{"a":[1,2,3],"b":{"c":4}}"#, 2), // nested values don't inflate the count
+            (r#"["a,b","c"]"#, 2),        // commas inside strings are not structural
+        ];
+        for (src, want) in cases {
+            let mut r = Reader::new(src, &mut bufs);
+            let node = r.next_node().unwrap();
+            assert!(
+                matches!(node, Node::ObjectStart | Node::ArrayStart),
+                "src {src}: expected a container start"
+            );
+            assert_eq!(r.container_len(), *want, "src {src}");
+        }
+    }
 
     /// Recursively walk one value, returning a debug rendering.
     fn walk(p: &mut Reader<'_, '_>) -> Result<String, ParseError> {
