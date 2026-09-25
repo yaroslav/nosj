@@ -17,7 +17,11 @@
 //!
 //! Duplicate keys resolve to the **first** occurrence (streaming
 //! semantics; a last-wins map like serde's sees the last).
+//!
+//! The `_with` variants walk the grammar extensions of [`ParseOptions`],
+//! so documents accepted by [`crate::parse_with`] resolve too.
 
+use crate::cursor::ParseOptions;
 use crate::reader::{Buffers, ErrorKind, ParseError};
 use crate::scalars::{self, StrPart};
 use crate::stage1;
@@ -43,6 +47,17 @@ pub fn pointer<'j>(
     unsafe { pointer_utf8_unchecked(input.as_bytes(), pointer, bufs) }
 }
 
+/// Like [`pointer()`], with grammar extensions from [`ParseOptions`].
+pub fn pointer_with<'j>(
+    input: &'j str,
+    pointer: &str,
+    bufs: &mut Buffers,
+    opts: ParseOptions,
+) -> Result<Option<&'j str>, ParseError> {
+    // SAFETY: &str is valid UTF-8.
+    unsafe { pointer_utf8_unchecked_with(input.as_bytes(), pointer, bufs, opts) }
+}
+
 /// Like [`pointer()`], for callers whose runtime vouches for UTF-8.
 ///
 /// # Safety
@@ -53,6 +68,22 @@ pub unsafe fn pointer_utf8_unchecked<'j>(
     pointer: &str,
     bufs: &mut Buffers,
 ) -> Result<Option<&'j str>, ParseError> {
+    // SAFETY: forwarded contract.
+    unsafe { pointer_utf8_unchecked_with(input, pointer, bufs, ParseOptions::default()) }
+}
+
+/// Like [`pointer_utf8_unchecked`], with grammar extensions from
+/// [`ParseOptions`].
+///
+/// # Safety
+///
+/// `input` must be valid UTF-8.
+pub unsafe fn pointer_utf8_unchecked_with<'j>(
+    input: &'j [u8],
+    pointer: &str,
+    bufs: &mut Buffers,
+    opts: ParseOptions,
+) -> Result<Option<&'j str>, ParseError> {
     if !pointer.is_empty() && !pointer.starts_with('/') {
         return Err(ParseError {
             offset: 0,
@@ -60,7 +91,7 @@ pub unsafe fn pointer_utf8_unchecked<'j>(
         });
     }
     // SAFETY: forwarded contract; the caller vouches `input` is UTF-8.
-    let range = unsafe { resolve(input, pointer, &mut bufs.scratch) }?;
+    let range = unsafe { resolve(input, pointer, &mut bufs.scratch, opts) }?;
     // SAFETY: `input` is valid UTF-8 and the range falls on token edges
     // (ASCII boundaries).
     Ok(range.map(|(start, end)| unsafe { std::str::from_utf8_unchecked(&input[start..end]) }))
@@ -85,7 +116,12 @@ fn skip_ws(input: &[u8], mut i: usize) -> usize {
 /// # Safety
 ///
 /// `input` must be valid UTF-8.
-unsafe fn value_end(input: &[u8], i: usize, scratch: &mut Vec<u8>) -> Result<usize, ParseError> {
+unsafe fn value_end(
+    input: &[u8],
+    i: usize,
+    scratch: &mut Vec<u8>,
+    opts: ParseOptions,
+) -> Result<usize, ParseError> {
     let eof = || ParseError::unexpected_end(input.len());
     match *input.get(i).ok_or_else(eof)? {
         // SAFETY: UTF-8 per this function's contract; `i` holds the `"`.
@@ -94,13 +130,39 @@ unsafe fn value_end(input: &[u8], i: usize, scratch: &mut Vec<u8>) -> Result<usi
             .map_err(|e| ParseError::scalar(e, i)),
         b'-' | b'0'..=b'9' => scalars::parse_number(input, i)
             .map(|(_, end)| end)
-            .map_err(|e| ParseError::scalar(e, i)),
+            // `-Infinity` fails the number grammar first.
+            .or_else(|e| nan_keyword_end(input, i, opts, ParseError::scalar(e, i))),
         b't' | b'f' | b'n' => scalars::parse_literal(input, i)
             .map(|(_, end)| end)
             .map_err(|e| ParseError::scalar(e, i)),
         b'{' | b'[' => stage1::container_end(input, i).ok_or_else(eof),
-        _ => Err(ParseError::unexpected_character(i)),
+        _ => nan_keyword_end(input, i, opts, ParseError::unexpected_character(i)),
     }
+}
+
+/// End offset of the `allow_nan` keyword at `i`, or the error the strict
+/// grammar reports there.
+#[cold]
+fn nan_keyword_end(
+    input: &[u8],
+    i: usize,
+    opts: ParseOptions,
+    strict: ParseError,
+) -> Result<usize, ParseError> {
+    if opts.allow_nan
+        && let Some((_, end)) = scalars::parse_nan_keyword(input, i)
+    {
+        return Ok(end);
+    }
+    Err(strict)
+}
+
+/// After a member's `,` (whitespace skipped, `i` on the next token):
+/// true when `opts` allow a trailing comma and `closer` ends the
+/// container right here.
+#[inline(always)]
+fn trailing_close(input: &[u8], i: usize, opts: ParseOptions, closer: u8) -> bool {
+    opts.allow_trailing_comma && input.get(i) == Some(&closer)
 }
 
 /// Walk the pointer tokens, returning the byte range of the match.
@@ -112,6 +174,7 @@ unsafe fn resolve(
     input: &[u8],
     pointer: &str,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<(usize, usize)>, ParseError> {
     let mut i = skip_ws(input, 0);
 
@@ -119,7 +182,7 @@ unsafe fn resolve(
         // The whole document is the match; enforce a complete document
         // like a full parse would.
         // SAFETY: forwarded UTF-8 contract.
-        let end = unsafe { value_end(input, i, scratch) }?;
+        let end = unsafe { value_end(input, i, scratch, opts) }?;
         let trail = skip_ws(input, end);
         if trail != input.len() {
             return Err(ParseError::trailing_characters(trail));
@@ -134,11 +197,11 @@ unsafe fn resolve(
             None => return Err(ParseError::unexpected_end(input.len())),
             Some(b'{') => {
                 // SAFETY: forwarded UTF-8 contract.
-                unsafe { descend_object(input, i, token, scratch) }?
+                unsafe { descend_object(input, i, token, scratch, opts) }?
             }
             Some(b'[') => {
                 // SAFETY: forwarded UTF-8 contract.
-                unsafe { descend_array(input, i, token, scratch) }?
+                unsafe { descend_array(input, i, token, scratch, opts) }?
             }
             // A scalar cannot be descended into.
             Some(_) => None,
@@ -149,7 +212,7 @@ unsafe fn resolve(
         i = value_pos;
         if is_last {
             // SAFETY: forwarded UTF-8 contract.
-            let end = unsafe { value_end(input, i, scratch) }?;
+            let end = unsafe { value_end(input, i, scratch, opts) }?;
             return Ok(Some((i, end)));
         }
     }
@@ -188,6 +251,17 @@ pub fn pointers<'j>(
     unsafe { pointers_utf8_unchecked(input.as_bytes(), pointers, bufs) }
 }
 
+/// Like [`pointers()`], with grammar extensions from [`ParseOptions`].
+pub fn pointers_with<'j>(
+    input: &'j str,
+    pointers: &[&str],
+    bufs: &mut Buffers,
+    opts: ParseOptions,
+) -> Result<Vec<Option<&'j str>>, ParseError> {
+    // SAFETY: &str is valid UTF-8.
+    unsafe { pointers_utf8_unchecked_with(input.as_bytes(), pointers, bufs, opts) }
+}
+
 /// Like [`pointers()`], for callers whose runtime vouches for UTF-8.
 ///
 /// # Safety
@@ -197,6 +271,22 @@ pub unsafe fn pointers_utf8_unchecked<'j>(
     input: &'j [u8],
     pointers: &[&str],
     bufs: &mut Buffers,
+) -> Result<Vec<Option<&'j str>>, ParseError> {
+    // SAFETY: forwarded contract.
+    unsafe { pointers_utf8_unchecked_with(input, pointers, bufs, ParseOptions::default()) }
+}
+
+/// Like [`pointers_utf8_unchecked`], with grammar extensions from
+/// [`ParseOptions`].
+///
+/// # Safety
+///
+/// `input` must be valid UTF-8.
+pub unsafe fn pointers_utf8_unchecked_with<'j>(
+    input: &'j [u8],
+    pointers: &[&str],
+    bufs: &mut Buffers,
+    opts: ParseOptions,
 ) -> Result<Vec<Option<&'j str>>, ParseError> {
     // Tokenize (and unescape) every pointer up front: once per token,
     // not once per level visit. The arena owns the tokens; queries borrow.
@@ -236,6 +326,7 @@ pub unsafe fn pointers_utf8_unchecked<'j>(
             &mut results,
             &mut remaining,
             &mut bufs.scratch,
+            opts,
         )
     }?;
     // Root pointers keep the single-pointer contract of validating a
@@ -304,6 +395,7 @@ unsafe fn resolve_set(
     results: &mut Vec<Option<(usize, usize)>>,
     remaining: &mut usize,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<usize>, ParseError> {
     let deeper: Vec<Query<'_>> = queries
         .iter()
@@ -315,7 +407,8 @@ unsafe fn resolve_set(
         None => return Err(ParseError::unexpected_end(input.len())),
         Some(b'{') if !deeper.is_empty() => {
             // SAFETY: forwarded UTF-8 contract.
-            let walked = unsafe { walk_object(input, i, &deeper, results, remaining, scratch) }?;
+            let walked =
+                unsafe { walk_object(input, i, &deeper, results, remaining, scratch, opts) }?;
             match walked {
                 Some(end) => end,
                 None => return Ok(None),
@@ -323,7 +416,8 @@ unsafe fn resolve_set(
         }
         Some(b'[') if !deeper.is_empty() => {
             // SAFETY: forwarded UTF-8 contract.
-            let walked = unsafe { walk_array(input, i, &deeper, results, remaining, scratch) }?;
+            let walked =
+                unsafe { walk_array(input, i, &deeper, results, remaining, scratch, opts) }?;
             match walked {
                 Some(end) => end,
                 None => return Ok(None),
@@ -331,7 +425,7 @@ unsafe fn resolve_set(
         }
         // Scalar, or a container no pointer descends into: one skip.
         // SAFETY: forwarded UTF-8 contract.
-        _ => unsafe { value_end(input, i, scratch) }?,
+        _ => unsafe { value_end(input, i, scratch, opts) }?,
     };
 
     for q in queries {
@@ -358,6 +452,7 @@ unsafe fn walk_object(
     results: &mut Vec<Option<(usize, usize)>>,
     remaining: &mut usize,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<usize>, ParseError> {
     i = skip_ws(input, i + 1);
     if input.get(i) == Some(&b'}') {
@@ -369,6 +464,10 @@ unsafe fn walk_object(
     let mut live: Vec<Query<'_>> = deeper.to_vec();
     loop {
         if input.get(i) != Some(&b'"') {
+            // Past the first member, so a `}` here follows a comma.
+            if trailing_close(input, i, opts, b'}') {
+                return Ok(Some(i + 1));
+            }
             return Err(ParseError::expected("'\"'", i));
         }
         // SAFETY: forwarded UTF-8 contract; `i` holds a `"`.
@@ -395,10 +494,10 @@ unsafe fn walk_object(
         i = skip_ws(input, i + 1);
         let value_past = if advanced.is_empty() {
             // SAFETY: forwarded UTF-8 contract.
-            unsafe { value_end(input, i, scratch) }?
+            unsafe { value_end(input, i, scratch, opts) }?
         } else {
             // SAFETY: forwarded UTF-8 contract.
-            match unsafe { resolve_set(input, i, &advanced, results, remaining, scratch) }? {
+            match unsafe { resolve_set(input, i, &advanced, results, remaining, scratch, opts) }? {
                 Some(end) => end,
                 None => return Ok(None),
             }
@@ -425,6 +524,7 @@ unsafe fn walk_array(
     results: &mut Vec<Option<(usize, usize)>>,
     remaining: &mut usize,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<usize>, ParseError> {
     i = skip_ws(input, i + 1);
     if input.get(i) == Some(&b']') {
@@ -444,17 +544,22 @@ unsafe fn walk_array(
             .collect();
         let value_past = if advanced.is_empty() {
             // SAFETY: forwarded UTF-8 contract.
-            unsafe { value_end(input, i, scratch) }?
+            unsafe { value_end(input, i, scratch, opts) }?
         } else {
             // SAFETY: forwarded UTF-8 contract.
-            match unsafe { resolve_set(input, i, &advanced, results, remaining, scratch) }? {
+            match unsafe { resolve_set(input, i, &advanced, results, remaining, scratch, opts) }? {
                 Some(end) => end,
                 None => return Ok(None),
             }
         };
         i = skip_ws(input, value_past);
         match input.get(i) {
-            Some(b',') => i = skip_ws(input, i + 1),
+            Some(b',') => {
+                i = skip_ws(input, i + 1);
+                if trailing_close(input, i, opts, b']') {
+                    return Ok(Some(i + 1));
+                }
+            }
             Some(b']') => return Ok(Some(i + 1)),
             Some(_) => return Err(ParseError::expected("',' or ']'", i)),
             None => return Err(ParseError::unexpected_end(input.len())),
@@ -468,10 +573,15 @@ unsafe fn walk_array(
             // element-by-element (cheap: container_end per element).
             loop {
                 // SAFETY: forwarded UTF-8 contract.
-                let past = unsafe { value_end(input, i, scratch) }?;
+                let past = unsafe { value_end(input, i, scratch, opts) }?;
                 i = skip_ws(input, past);
                 match input.get(i) {
-                    Some(b',') => i = skip_ws(input, i + 1),
+                    Some(b',') => {
+                        i = skip_ws(input, i + 1);
+                        if trailing_close(input, i, opts, b']') {
+                            return Ok(Some(i + 1));
+                        }
+                    }
                     Some(b']') => return Ok(Some(i + 1)),
                     Some(_) => return Err(ParseError::expected("',' or ']'", i)),
                     None => return Err(ParseError::unexpected_end(input.len())),
@@ -493,6 +603,7 @@ unsafe fn descend_object(
     mut i: usize,
     token: &str,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<usize>, ParseError> {
     // Unescape once per level: `~1` -> `/`, then `~0` -> `~` (RFC 6901
     // order). Clean tokens compare borrowed.
@@ -507,6 +618,10 @@ unsafe fn descend_object(
     }
     loop {
         if input.get(i) != Some(&b'"') {
+            // Past the first member, so a `}` here follows a comma.
+            if trailing_close(input, i, opts, b'}') {
+                return Ok(None); // key not present
+            }
             return Err(ParseError::expected("'\"'", i));
         }
         // SAFETY: forwarded UTF-8 contract; `i` holds a `"`.
@@ -526,7 +641,7 @@ unsafe fn descend_object(
             return Ok(Some(i)); // the value at `i` is this level's match
         }
         // SAFETY: forwarded UTF-8 contract.
-        let value_past = unsafe { value_end(input, i, scratch) }?;
+        let value_past = unsafe { value_end(input, i, scratch, opts) }?;
         i = skip_ws(input, value_past);
         match input.get(i) {
             Some(b',') => i = skip_ws(input, i + 1),
@@ -549,6 +664,7 @@ unsafe fn descend_array(
     mut i: usize,
     token: &str,
     scratch: &mut Vec<u8>,
+    opts: ParseOptions,
 ) -> Result<Option<usize>, ParseError> {
     // Array-index tokens are digits without leading zeros; anything else
     // ("-", "01", "1x", "") cannot match.
@@ -569,10 +685,15 @@ unsafe fn descend_array(
     }
     for _ in 0..target {
         // SAFETY: forwarded UTF-8 contract.
-        let value_past = unsafe { value_end(input, i, scratch) }?;
+        let value_past = unsafe { value_end(input, i, scratch, opts) }?;
         i = skip_ws(input, value_past);
         match input.get(i) {
-            Some(b',') => i = skip_ws(input, i + 1),
+            Some(b',') => {
+                i = skip_ws(input, i + 1);
+                if trailing_close(input, i, opts, b']') {
+                    return Ok(None); // out of range
+                }
+            }
             Some(b']') => return Ok(None), // out of range
             Some(_) => return Err(ParseError::expected("',' or ']'", i)),
             None => return Err(ParseError::unexpected_end(input.len())),
@@ -740,5 +861,71 @@ mod tests {
             p.skip_value().unwrap();
             p.finish().unwrap();
         }
+    }
+
+    /// Hits, misses past the extension, and whole-document pointers
+    /// resolve under the matching option, single and batched alike,
+    /// while the default resolvers keep rejecting what they walk into.
+    #[test]
+    fn parse_options_extend_resolution() {
+        let trailing = ParseOptions {
+            allow_trailing_comma: true,
+            ..ParseOptions::default()
+        };
+        let nan = ParseOptions {
+            allow_nan: true,
+            ..ParseOptions::default()
+        };
+        let cases: &[(&str, ParseOptions, &str, Option<&str>)] = &[
+            (r#"{"a":1,"b":[3,],}"#, trailing, "/b", Some("[3,]")),
+            (r#"{"a":1,"b":[3,],}"#, trailing, "/z", None),
+            (r#"{"a":1,"b":[3,],}"#, trailing, "/b/0", Some("3")),
+            (r#"{"a":1,"b":[3,],}"#, trailing, "/b/1", None),
+            ("[1,2,]", trailing, "/1", Some("2")),
+            ("[1,2,]", trailing, "/2", None),
+            ("[1, 2 , ]", trailing, "/5", None),
+            ("[[1,],[2,],]", trailing, "/1/0", Some("2")),
+            ("[1,2,]", trailing, "", Some("[1,2,]")),
+            (r#"{"a":NaN,"b":1}"#, nan, "/b", Some("1")),
+            (r#"{"a":NaN,"b":1}"#, nan, "/a", Some("NaN")),
+            (r#"{"a":NaN,"b":1}"#, nan, "/z", None),
+            ("[-Infinity,Infinity]", nan, "/1", Some("Infinity")),
+            ("[-Infinity,Infinity]", nan, "/0", Some("-Infinity")),
+            ("-Infinity", nan, "", Some("-Infinity")),
+        ];
+        let mut bufs = Buffers::new();
+        for &(doc, opts, ptr, want) in cases {
+            assert_eq!(
+                pointer_with(doc, ptr, &mut bufs, opts).unwrap(),
+                want,
+                "{doc} {ptr}"
+            );
+            assert_eq!(
+                pointers_with(doc, &[ptr], &mut bufs, opts).unwrap(),
+                [want],
+                "{doc} {ptr} batch"
+            );
+        }
+        // Default resolvers stay strict wherever they walk the extension.
+        for (doc, ptr) in [
+            (r#"{"a":1,}"#, "/z"),
+            ("[1,2,]", "/2"),
+            (r#"{"a":NaN,"b":1}"#, "/b"),
+            ("[NaN]", "/0"),
+        ] {
+            assert!(pointer(doc, ptr, &mut bufs).is_err(), "{doc} {ptr}");
+            assert!(
+                pointers(doc, &[ptr], &mut bufs).is_err(),
+                "{doc} {ptr} batch"
+            );
+        }
+        // Options never loosen anything else.
+        for (doc, ptr) in [("[1,,]", "/5"), (r#"{"a":1,,}"#, "/z"), ("[,]", "/0")] {
+            assert!(
+                pointer_with(doc, ptr, &mut bufs, trailing).is_err(),
+                "{doc} {ptr}"
+            );
+        }
+        assert!(pointer_with("[Nan,1]", "/1", &mut bufs, nan).is_err());
     }
 }
