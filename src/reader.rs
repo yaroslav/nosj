@@ -437,8 +437,9 @@ impl<'j, 'b> Reader<'j, 'b> {
     /// Read-only: it does NOT advance the cursor. Intended as a pre-sizing hint
     /// for hosts that allocate a native container up front (e.g. a Lua table via
     /// `lua_createtable(narr, nrec)`). Cost is O(container size in tokens): a
-    /// pure index walk mirroring [`skip_container`](Self::skip_container), depth-
-    /// counting brackets and tallying top-level commas. Returns 0 for an empty
+    /// pure index walk, the same one [`skip_value`](Self::skip_value) uses to
+    /// step over a container, depth-counting brackets and tallying top-level
+    /// commas. Returns 0 for an empty
     /// container. On a malformed tail it returns whatever it counted before the
     /// index ran out — it never parses scalars, so it cannot error.
     #[must_use]
