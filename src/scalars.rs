@@ -822,6 +822,24 @@ pub fn parse_literal(input: &[u8], start: usize) -> Result<(Literal, usize), Sca
     Ok((lit, end))
 }
 
+/// The `allow_nan` keyword at `start` (`NaN`, `Infinity` or
+/// `-Infinity`, chosen by its first byte), boundary-checked like the
+/// literals: its value and the offset one past it, or `None` when the
+/// bytes there are not exactly one of the keywords. For the index and
+/// pointer walkers; the cursor inlines its own copy on the hot path.
+pub(crate) fn parse_nan_keyword(input: &[u8], start: usize) -> Option<(f64, usize)> {
+    let (keyword, value): (&[u8], f64) = match input.get(start)? {
+        b'N' => (b"NaN", f64::NAN),
+        b'I' => (b"Infinity", f64::INFINITY),
+        b'-' => (b"-Infinity", f64::NEG_INFINITY),
+        _ => return None,
+    };
+    let end = start + keyword.len();
+    let matched = input.get(start..end) == Some(keyword)
+        && input.get(end).is_none_or(|&b| is_token_boundary(b));
+    matched.then_some((value, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

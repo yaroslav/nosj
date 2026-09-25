@@ -1,3 +1,18 @@
+## [0.2.2] - 2026-09-25
+
+- `ParseOptions` now reach the pull and partial-parsing APIs:
+  `Reader::new_with`/`Reader::from_utf8_unchecked_with` and
+  `pointer_with`/`pointers_with` (plus their `_utf8_unchecked_with`
+  forms) accept exactly the documents `parse_with` does. Before this,
+  a document parsed under `allow_trailing_comma` or `allow_nan` could
+  not be walked or resolved at all: a trailing comma failed every
+  member walk and every miss past it, and a single `NaN` failed every
+  pointer that had to step over it. The plain entry points keep the
+  strict grammar, and their resolution speed is unchanged (every new
+  check sits on a cold path or behind the option flag).
+- `Reader::container_len()` no longer counts a trailing comma as a
+  member (`[1,2,]` is 2).
+
 ## [0.2.1] - 2026-09-25
 
 - New `Reader::container_len()`: the member count of the object or

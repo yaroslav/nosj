@@ -1,5 +1,6 @@
 //! The public pull API: a grammar-enforcing cursor over the stage-1 index.
 
+use crate::cursor::ParseOptions;
 use crate::scalars::{self, Literal, Number, ScalarError, StrPart};
 use crate::stage1;
 
@@ -181,6 +182,7 @@ pub struct Reader<'j, 'b> {
     input: &'j [u8],
     bufs: &'b mut Buffers,
     pos: usize,
+    opts: ParseOptions,
 }
 
 impl std::fmt::Debug for Reader<'_, '_> {
@@ -209,12 +211,50 @@ impl<'j, 'b> Reader<'j, 'b> {
     /// `input` must be valid UTF-8; string tokens are handed out as `&str`
     /// without re-validation.
     pub unsafe fn from_utf8_unchecked(input: &'j [u8], bufs: &'b mut Buffers) -> Self {
+        // SAFETY: forwarded contract.
+        unsafe { Self::from_utf8_unchecked_with(input, bufs, ParseOptions::default()) }
+    }
+
+    /// Like [`Reader::new`], with grammar extensions from [`ParseOptions`]:
+    /// the same document set [`crate::parse_with`] accepts is walkable,
+    /// and skippable, here.
+    #[must_use]
+    pub fn new_with(input: &'j str, bufs: &'b mut Buffers, opts: ParseOptions) -> Self {
+        // SAFETY: &str is valid UTF-8.
+        unsafe { Self::from_utf8_unchecked_with(input.as_bytes(), bufs, opts) }
+    }
+
+    /// Like [`Reader::from_utf8_unchecked`], with grammar extensions from
+    /// [`ParseOptions`].
+    ///
+    /// # Safety
+    ///
+    /// `input` must be valid UTF-8; string tokens are handed out as `&str`
+    /// without re-validation.
+    pub unsafe fn from_utf8_unchecked_with(
+        input: &'j [u8],
+        bufs: &'b mut Buffers,
+        opts: ParseOptions,
+    ) -> Self {
         stage1::index(input, &mut bufs.indexes);
         Self {
             input,
             bufs,
             pos: 0,
+            opts,
         }
+    }
+
+    /// The `allow_nan` keyword at `off` as a float node's value, or the
+    /// error the strict grammar reports there.
+    #[cold]
+    fn nan_keyword(&self, off: usize, strict: ParseError) -> Result<(f64, usize), ParseError> {
+        if self.opts.allow_nan
+            && let Some(hit) = scalars::parse_nan_keyword(self.input, off)
+        {
+            return Ok(hit);
+        }
+        Err(strict)
     }
 
     #[inline(always)]
@@ -264,8 +304,14 @@ impl<'j, 'b> Reader<'j, 'b> {
                 }))
             }
             b'-' | b'0'..=b'9' => {
-                let (num, _) = scalars::parse_number(self.input, off)
-                    .map_err(|e| ParseError::scalar(e, off))?;
+                let num = match scalars::parse_number(self.input, off) {
+                    Ok((num, _)) => num,
+                    // `-Infinity` fails the number grammar first.
+                    Err(e) => {
+                        let (f, _) = self.nan_keyword(off, ParseError::scalar(e, off))?;
+                        return Ok(Node::Float(f));
+                    }
+                };
                 Ok(match num {
                     Number::Int(i) => Node::Int(i),
                     // The pull API folds `-0` to integer 0; hosts that
@@ -285,7 +331,10 @@ impl<'j, 'b> Reader<'j, 'b> {
                     Literal::Null => Node::Null,
                 })
             }
-            _ => Err(ParseError::unexpected_character(off)),
+            _ => {
+                let (f, _) = self.nan_keyword(off, ParseError::unexpected_character(off))?;
+                Ok(Node::Float(f))
+            }
         }
     }
 
@@ -330,6 +379,7 @@ impl<'j, 'b> Reader<'j, 'b> {
             (_, b'}') => Ok(None),
             (_, b',') => match self.take_tok()? {
                 (off, b'"') => self.read_key(off),
+                (_, b'}') if self.opts.allow_trailing_comma => Ok(None),
                 (o, _) => Err(ParseError::expected("'\"'", o)),
             },
             (o, _) => Err(ParseError::expected("',' or '}'", o)),
@@ -355,7 +405,13 @@ impl<'j, 'b> Reader<'j, 'b> {
     pub fn array_next(&mut self) -> Result<bool, ParseError> {
         match self.take_tok()? {
             (_, b']') => Ok(false),
-            (_, b',') => Ok(true),
+            (_, b',') => {
+                if self.opts.allow_trailing_comma && matches!(self.peek_tok(), Some((_, b']'))) {
+                    self.pos += 1;
+                    return Ok(false);
+                }
+                Ok(true)
+            }
             (o, _) => Err(ParseError::expected("',' or ']'", o)),
         }
     }
@@ -382,11 +438,11 @@ impl<'j, 'b> Reader<'j, 'b> {
                     .map_err(|e| ParseError::scalar(e, start))?
                     .1
             }
-            b'-' | b'0'..=b'9' => {
-                scalars::parse_number(self.input, start)
-                    .map_err(|e| ParseError::scalar(e, start))?
-                    .1
-            }
+            b'-' | b'0'..=b'9' => match scalars::parse_number(self.input, start) {
+                Ok((_, end)) => end,
+                // `-Infinity` fails the number grammar first.
+                Err(e) => self.nan_keyword(start, ParseError::scalar(e, start))?.1,
+            },
             b't' | b'f' | b'n' => {
                 scalars::parse_literal(self.input, start)
                     .map_err(|e| ParseError::scalar(e, start))?
@@ -394,7 +450,8 @@ impl<'j, 'b> Reader<'j, 'b> {
             }
             b'{' | b'[' => self.skip_container()?,
             _ => {
-                return Err(ParseError::unexpected_character(start));
+                self.nan_keyword(start, ParseError::unexpected_character(start))?
+                    .1
             }
         };
         // SAFETY: the constructor guarantees `input` is valid UTF-8, and
@@ -418,6 +475,9 @@ impl<'j, 'b> Reader<'j, 'b> {
                     }
                 }
                 b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n' | b',' | b':' => {}
+                // Keyword tokens step over like any scalar: skipped
+                // content is never parsed.
+                b'N' | b'I' if self.opts.allow_nan => {}
                 _ => {
                     return Err(ParseError {
                         offset: off,
@@ -440,7 +500,8 @@ impl<'j, 'b> Reader<'j, 'b> {
     /// pure index walk, the same one [`skip_value`](Self::skip_value) uses to
     /// step over a container, depth-counting brackets and tallying top-level
     /// commas. Returns 0 for an empty
-    /// container. On a malformed tail it returns whatever it counted before the
+    /// container. A trailing comma (see [`ParseOptions`]) is not counted as a
+    /// member. On a malformed tail it returns whatever it counted before the
     /// index ran out — it never parses scalars, so it cannot error.
     #[must_use]
     pub fn container_len(&self) -> usize {
@@ -452,20 +513,27 @@ impl<'j, 'b> Reader<'j, 'b> {
         }
         let mut depth = 1usize;
         let mut commas = 0usize;
+        let mut prev = 0u8;
         let mut i = self.pos;
         while let Some(&off) = indexes.get(i) {
             i += 1;
-            match self.input[off as usize] {
+            let byte = self.input[off as usize];
+            match byte {
                 b'{' | b'[' => depth += 1,
                 b'}' | b']' => {
                     depth -= 1;
                     if depth == 0 {
+                        // A comma right before the closer ends no member.
+                        if prev == b',' {
+                            commas -= 1;
+                        }
                         break;
                     }
                 }
                 b',' if depth == 1 => commas += 1,
                 _ => {}
             }
+            prev = byte;
         }
         commas + 1
     }
@@ -554,6 +622,79 @@ mod tests {
         let out = walk(&mut p)?;
         p.finish()?;
         Ok(out)
+    }
+
+    fn parse_with(doc: &str, opts: ParseOptions) -> Result<String, ParseError> {
+        let mut bufs = Buffers::new();
+        let mut p = Reader::new_with(doc, &mut bufs, opts);
+        let out = walk(&mut p)?;
+        p.finish()?;
+        Ok(out)
+    }
+
+    /// Skip a whole document under `opts`, returning the skipped text.
+    fn skip_with(doc: &str, opts: ParseOptions) -> Result<String, ParseError> {
+        let mut bufs = Buffers::new();
+        let mut p = Reader::new_with(doc, &mut bufs, opts);
+        let raw = p.skip_value()?.to_string();
+        p.finish()?;
+        Ok(raw)
+    }
+
+    /// Each extension is walkable (and skippable) exactly when its option
+    /// is on; the default Reader keeps rejecting it.
+    #[test]
+    fn parse_options_extend_the_walk() {
+        let trailing = ParseOptions {
+            allow_trailing_comma: true,
+            ..ParseOptions::default()
+        };
+        let nan = ParseOptions {
+            allow_nan: true,
+            ..ParseOptions::default()
+        };
+        let cases: &[(&str, ParseOptions, &str)] = &[
+            ("[1,2,]", trailing, "[int(1);int(2);]"),
+            (r#"{"a":1,}"#, trailing, "{a=int(1);}"),
+            (
+                r#"{"a":[1,],"b":{"c":2,},}"#,
+                trailing,
+                "{a=[int(1);];b={c=int(2);};}",
+            ),
+            ("[ 1 , ]", trailing, "[int(1);]"),
+            ("[NaN,Infinity,-Infinity]", nan, "[f(NaN);f(inf);f(-inf);]"),
+            (r#"{"a":NaN}"#, nan, "{a=f(NaN);}"),
+            ("NaN", nan, "f(NaN)"),
+        ];
+        for &(doc, opts, want) in cases {
+            assert_eq!(parse_with(doc, opts).unwrap(), want, "{doc}");
+            assert!(parse(doc).is_err(), "{doc} must stay strict by default");
+            assert_eq!(skip_with(doc, opts).unwrap(), doc, "{doc} skip");
+        }
+        // Options never loosen anything else.
+        for bad in ["[,]", "{,}", "[1,,]", r#"{"a":1,,}"#, "[1 2]"] {
+            assert!(parse_with(bad, trailing).is_err(), "{bad}");
+        }
+        for bad in ["[Nan]", "[NaNx]", "[-Inf]", "[Infinityy]", "[+Infinity]"] {
+            assert!(parse_with(bad, nan).is_err(), "{bad}");
+        }
+        // Keywords inside a skipped container are stepped over like any
+        // scalar token.
+        assert_eq!(
+            skip_with(r#"{"a":[NaN,{"b":Infinity}]}"#, nan).unwrap(),
+            r#"{"a":[NaN,{"b":Infinity}]}"#
+        );
+        assert!(skip_with(r#"{"a":[NaN]}"#, ParseOptions::default()).is_err());
+    }
+
+    #[test]
+    fn container_len_ignores_a_trailing_comma() {
+        let mut bufs = Buffers::new();
+        for (src, want) in [("[1,2,]", 2), (r#"{"a":1,}"#, 1), ("[[1,],2,]", 2)] {
+            let mut r = Reader::new(src, &mut bufs);
+            r.next_node().unwrap();
+            assert_eq!(r.container_len(), want, "src {src}");
+        }
     }
 
     #[test]

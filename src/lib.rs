@@ -105,14 +105,18 @@ mod writer;
 // = two-pass structural indexing), input trust (`_utf8_unchecked` = the
 // host's runtime vouches for UTF-8), and grammar extensions (`_with`
 // takes `ParseOptions`). `parse_preindexed_utf8_unchecked` is the
-// second half of the split `Buffers::preindex` phase.
+// second half of the split `Buffers::preindex` phase. The pointer
+// resolvers and `Reader` constructors share the trust and `_with` axes.
 pub use cursor::{
     ParseOptions, parse, parse_utf8_unchecked, parse_utf8_unchecked_with, parse_with,
 };
 pub use driver::{
     DriveError, Sink, parse_indexed, parse_indexed_utf8_unchecked, parse_preindexed_utf8_unchecked,
 };
-pub use pointer::{pointer, pointer_utf8_unchecked, pointers, pointers_utf8_unchecked};
+pub use pointer::{
+    pointer, pointer_utf8_unchecked, pointer_utf8_unchecked_with, pointer_with, pointers,
+    pointers_utf8_unchecked, pointers_utf8_unchecked_with, pointers_with,
+};
 pub use reader::{Buffers, ErrorKind, Node, ParseError, Reader};
 pub use writer::{FloatFormat, WriteOptions, Writer};
 
