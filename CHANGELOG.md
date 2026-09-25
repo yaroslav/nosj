@@ -1,3 +1,14 @@
+## [Unreleased]
+
+- New `Reader::container_len()`: the member count of the object or
+  array just opened by `next_node()` (pairs for an object, elements
+  for an array), read before its first `object_first_key`/`array_first`
+  without advancing the cursor. A pre-sizing hint for hosts that
+  allocate native containers up front (e.g. `lua_createtable(narr,
+  nrec)`), skipping rehash/regrow. Cost is a walk over the
+  already-built index, O(container size); 0 for an empty container,
+  and never errors (it counts structure, never parses scalars).
+
 ## [0.2.0] - 2026-07-17
 
 - New escape mode `EscapeMode::HtmlSafe`: additionally escapes `<`,
