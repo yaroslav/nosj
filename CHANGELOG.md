@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.2.1] - 2026-09-25
 
 - New `Reader::container_len()`: the member count of the object or
   array just opened by `next_node()` (pairs for an object, elements
@@ -8,6 +8,9 @@
   nrec)`), skipping rehash/regrow. Cost is a walk over the
   already-built index, O(container size); 0 for an empty container,
   and never errors (it counts structure, never parses scalars).
+- Minimum dependency versions raised to the tested ones: `fast-float2`
+  0.2.4 and (with `shortest-floats`) `zmij` 1.0.23. Both were already
+  semver-compatible with 0.2.0's requirements.
 
 ## [0.2.0] - 2026-07-17
 
