@@ -497,9 +497,9 @@ mod tests {
             (r#"{"x":1}"#, 1),
             ("[1,2,3]", 3),
             (r#"{"a":1,"b":2}"#, 2),
-            ("[[1,2],[3]]", 2),           // nested arrays: 2 top-level elements
+            ("[[1,2],[3]]", 2), // nested arrays: 2 top-level elements
             (r#"{"a":[1,2,3],"b":{"c":4}}"#, 2), // nested values don't inflate the count
-            (r#"["a,b","c"]"#, 2),        // commas inside strings are not structural
+            (r#"["a,b","c"]"#, 2), // commas inside strings are not structural
         ];
         for (src, want) in cases {
             let mut r = Reader::new(src, &mut bufs);
