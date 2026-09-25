@@ -446,8 +446,7 @@ impl<'j, 'b> Reader<'j, 'b> {
         let indexes = &self.bufs.indexes;
         // Empty container: the first inner token is already the closer.
         match indexes.get(self.pos).map(|&off| self.input[off as usize]) {
-            Some(b'}' | b']') => return 0,
-            None => return 0,
+            Some(b'}' | b']') | None => return 0,
             _ => {}
         }
         let mut depth = 1usize;
