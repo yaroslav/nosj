@@ -31,8 +31,8 @@ include = [
 ]
 
 [dependencies]
-fast-float2 = "0.2.3"
-zmij = { version = "1.0.21", optional = true }
+fast-float2 = "0.2.4"
+zmij = { version = "1.0.23", optional = true }
 
 # Standalone builds (tests, kernel_bench) use the same codegen settings the
 # downstream host builds this crate with, so benchmark numbers stay
@@ -75,12 +75,12 @@ cast_precision_loss = "allow"      # u64->f64 in Clinger path is guarded by w < 
 many_single_char_names = "allow"   # s/i/b/w/dst in byte kernels; longer names hurt density
 
 [dev-dependencies]
-jiter = "0.16.0"
+jiter = "0.17.0"
 json = "0.12.4"
 json-steroids = "0.3.1"
-serde_json = "1.0.150"
-simd-json = "0.17.3"
-sonic-rs = "0.5.8"
+serde_json = "1.0.151"
+simd-json = "0.18.1"
+sonic-rs = "0.5.10"
 
 # asmjson's hand-written assembly uses ELF directives and cannot assemble
 # for x86_64 macOS (the Rosetta test target) or Windows (MSVC's lib.exe

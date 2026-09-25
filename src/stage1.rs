@@ -189,9 +189,9 @@ fn index_scalar_impl<const PACK: bool>(input: &[u8], out: &mut Vec<u32>) {
     out.reserve(input.len() + 8);
     let mut carries = Carries::default();
 
-    let mut chunks = input.chunks_exact(64);
+    let (chunks, rem) = input.as_chunks::<64>();
     let mut base: u32 = 0;
-    for chunk in &mut chunks {
+    for chunk in chunks {
         let (mut bs, mut quote, mut op, mut ws) = (0u64, 0u64, 0u64, 0u64);
         for (i, &b) in chunk.iter().enumerate() {
             let (cb, cq, co, cw) = classify_byte(b);
@@ -205,7 +205,6 @@ fn index_scalar_impl<const PACK: bool>(input: &[u8], out: &mut Vec<u32>) {
         base += 64;
     }
 
-    let rem = chunks.remainder();
     if !rem.is_empty() {
         // 64-byte buffer so packed-byte reads stay in bounds.
         let mut buf = [0u8; 64];

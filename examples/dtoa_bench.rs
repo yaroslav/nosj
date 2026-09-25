@@ -11,8 +11,10 @@ fn main() {
         .unwrap_or_else(|| "/tmp/floats.f64".to_string());
     let bytes = std::fs::read(&path).expect("float stream file");
     let vals: Vec<f64> = bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect();
 
     let mut out = Vec::with_capacity(4 << 20);
